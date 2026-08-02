@@ -4,8 +4,9 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='💼 Создать сделку', callback_data='menu_create_deal')],
-        [InlineKeyboardButton(text='❓ Как проходит сделка?', callback_data='menu_how_it_works')],
+        [InlineKeyboardButton(text='❓ Как проходит сделка?', url='https://telegra.ph/Kak-bezopasno-provodit-sdelki-cherez-NIFTIX-08-02')],
         [InlineKeyboardButton(text='📢 Наш канал', callback_data='menu_channel')],
+        [InlineKeyboardButton(text='🆘 Поддержка', callback_data='menu_support')],
         [InlineKeyboardButton(text='👤 Мой профиль', callback_data='menu_profile')],
         [InlineKeyboardButton(text='⚙️ Настройки', callback_data='menu_settings')],
     ])
@@ -22,11 +23,14 @@ def profile_menu() -> InlineKeyboardMarkup:
     ])
 
 
-def settings_menu() -> InlineKeyboardMarkup:
+def settings_menu(language: str = 'ru') -> InlineKeyboardMarkup:
+    back_text = '⬅️ Back' if language == 'en' else '⬅️ Назад'
+    current_ru = ' ✅' if language == 'ru' else ''
+    current_en = ' ✅' if language == 'en' else ''
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='🇷🇺 Русский', callback_data='set_lang_ru')],
-        [InlineKeyboardButton(text='🇬🇧 English', callback_data='set_lang_en')],
-        [InlineKeyboardButton(text='⬅️ Назад', callback_data='menu_back')],
+        [InlineKeyboardButton(text=f'🇷🇺 Русский{current_ru}', callback_data='set_lang_ru')],
+        [InlineKeyboardButton(text=f'🇬🇧 English{current_en}', callback_data='set_lang_en')],
+        [InlineKeyboardButton(text=back_text, callback_data='menu_back')],
     ])
 
 
@@ -76,10 +80,11 @@ def admin_panel_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text='📊 Статистика', callback_data='admin_stats')],
         [InlineKeyboardButton(text='💼 Завершение сделок', callback_data='admin_finish_deals')],
         [InlineKeyboardButton(text='✅ Проверка оплат', callback_data='admin_payments')],
-        [InlineKeyboardButton(text='� Рассылка', callback_data='admin_broadcast')],
-        [InlineKeyboardButton(text='�💸 Заявки на вывод', callback_data='admin_withdraws')],
+        [InlineKeyboardButton(text='📢 Рассылка', callback_data='admin_broadcast')],
+        [InlineKeyboardButton(text='💸 Заявки на вывод', callback_data='admin_withdraws')],
         [InlineKeyboardButton(text='👥 Пользователи', callback_data='admin_users')],
         [InlineKeyboardButton(text='💰 Балансы', callback_data='admin_balances')],
         [InlineKeyboardButton(text='🚫 Заблокированные', callback_data='admin_blocked')],
+        [InlineKeyboardButton(text='📦 Выгрузить DB', callback_data='admin_export_db')],
         [InlineKeyboardButton(text='⚙️ Настройки', callback_data='admin_settings')],
     ])

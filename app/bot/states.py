@@ -23,3 +23,8 @@ class WithdrawRequestStates(StatesGroup):
 class BroadcastStates(StatesGroup):
     enter_text = State()
     confirm = State()
+
+
+class SupportStates(StatesGroup):
+    enter_message = State()
+    admin_reply = State()

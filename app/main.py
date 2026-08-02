@@ -24,7 +24,7 @@ async def main() -> None:
     await register_handlers(dp)
 
     logger.info('Запуск бота...')
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, polling_timeout=1)
 
 
 if __name__ == '__main__':
