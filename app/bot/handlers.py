@@ -33,6 +33,7 @@ from app.bot.states import (
     BroadcastStates,
     DealCreation,
     ProfileUpdate,
+    SupportStates,
     WithdrawRequestStates,
 )
 from app.bot.utils import build_payment_comment, format_balance
@@ -106,6 +107,20 @@ def get_deal_title(deal: Deal) -> str:
     return f'Сделка №{deal.deal_number}'
 
 
+def build_profile_caption(db_user: User, balances: list[Balance], language: str) -> str:
+    not_set = get_localized_text('not_set', language)
+    return (
+        f'{get_localized_text("profile_title", language)}\n'
+        f'ID: {db_user.id}\n'
+        f'Username: @{db_user.username or not_set}\n'
+        f'{get_localized_text("completed_deals", language)}: {db_user.completed_deals or 0}\n\n'
+        f'{get_localized_text("balance_title", language)}\n{format_balance(balances) or not_set}\n\n'
+        f'{get_localized_text("card_label", language)}: {db_user.card_data or not_set}\n'
+        f'{get_localized_text("wallet_label", language)}: {db_user.ton_wallet or not_set}\n'
+        f'{get_localized_text("stars_label", language)}: {db_user.stars_recipient or not_set}'
+    )
+
+
 async def get_user_language(session: AsyncSession, user_id: int) -> str:
     lang = await SettingsRepository(session).get(f'user_lang:{user_id}')
     return lang or 'ru'
@@ -131,6 +146,26 @@ def get_localized_text(key: str, language: str) -> str:
             'deal_completed_buyer': '✅ Сделка завершена.\nСпасибо за использование сервиса.',
             'admin_complete_seller': '✅ Сделка одобрена модерацией. Пожалуйста, передайте подарок покупателю.',
             'admin_complete_buyer': '✅ Сделка завершена администратором.',
+            'support_prompt': '🆘 Опишите вопрос одним сообщением. Администратор получит уведомление и сможет ответить вам.',
+            'support_sent': '✅ Сообщение отправлено в поддержку. Ожидайте ответа.',
+            'main_caption': '🔐 <b>NIF TIX</b> — безопасные сделки без лишнего шума.\n\nВыберите действие ниже 👇',
+            'create_step1': '🎁 Шаг 1/4 — Выберите тип сделки',
+            'create_step2': '🇷🇺 Шаг 2/4 — Выберите валюту',
+            'bind_card_prompt': 'Отправьте данные карты, которые будут использоваться для сделок.',
+            'bind_wallet_prompt': 'Отправьте TON кошелек, например: EQ...',
+            'bind_stars_prompt': 'Отправьте получателя Stars, например: @stars_receiver',
+            'card_saved': '✅ Карта сохранена.',
+            'wallet_saved': '✅ TON кошелек сохранен.',
+            'stars_saved': '✅ Получатель Stars сохранен.',
+            'profile_title': '<b>Профиль</b>',
+            'completed_deals': 'Завершенных сделок',
+            'balance_title': '<b>Баланс</b>',
+            'card_label': 'Привязанная карта',
+            'wallet_label': 'TON кошелек',
+            'stars_label': 'Получатель Stars',
+            'not_set': 'не задан',
+            'all_balances_title': '<b>Баланс всех валют</b>',
+            'back_to_profile_hint': 'Нажмите «Назад», чтобы вернуться к профилю.',
         },
         'en': {
             'settings_title': '⚙️ Settings',
@@ -146,13 +181,47 @@ def get_localized_text(key: str, language: str) -> str:
             'deal_completed_buyer': '✅ The deal is complete.\nThank you for using the service.',
             'admin_complete_seller': '✅ The deal was approved by moderation. Please transfer the gift to the buyer.',
             'admin_complete_buyer': '✅ The deal was completed by the administrator.',
+            'support_prompt': '🆘 Describe your issue in one message. An administrator will get a notification and can reply to you.',
+            'support_sent': '✅ Your message was sent to support. Please wait for a reply.',
+            'main_caption': '🔐 <b>NIF TIX</b> — secure deals without extra noise.\n\nChoose an action below 👇',
+            'create_step1': '🎁 Step 1/4 — Choose deal type',
+            'create_step2': '🇷🇺 Step 2/4 — Choose currency',
+            'bind_card_prompt': 'Send the card details that will be used for deals.',
+            'bind_wallet_prompt': 'Send your TON wallet, for example: EQ...',
+            'bind_stars_prompt': 'Send the Stars recipient, for example: @stars_receiver',
+            'card_saved': '✅ Card saved.',
+            'wallet_saved': '✅ TON wallet saved.',
+            'stars_saved': '✅ Stars recipient saved.',
+            'profile_title': '<b>Profile</b>',
+            'completed_deals': 'Completed deals',
+            'balance_title': '<b>Balance</b>',
+            'card_label': 'Bound card',
+            'wallet_label': 'TON wallet',
+            'stars_label': 'Stars recipient',
+            'not_set': 'not set',
+            'all_balances_title': '<b>All currency balances</b>',
+            'back_to_profile_hint': 'Press Back to return to your profile.',
         },
     }
     return texts.get(language, texts['ru']).get(key, key)
 
 
+async def localized_main_menu(session: AsyncSession, user_id: int) -> InlineKeyboardMarkup:
+    return main_menu(await get_user_language(session, user_id))
+
+
+async def localized_profile_menu(session: AsyncSession, user_id: int) -> InlineKeyboardMarkup:
+    return profile_menu(await get_user_language(session, user_id))
+
+
+def admin_user_label(user: User | None, fallback_id: int | None = None) -> str:
+    if user and user.username:
+        return f'@{user.username}'
+    return str(fallback_id if fallback_id is not None else (user.id if user else '-'))
+
+
 async def notify_admins(bot, text: str) -> None:
-    for admin_id in config.ADMIN_IDS:
+    for admin_id in set(config.ADMIN_IDS) | set(config.SUPER_ADMIN_IDS):
         try:
             await bot.send_message(admin_id, text)
         except Exception:
@@ -237,11 +306,12 @@ def callback_data_equals(data: str):
     return _filter
 
 
-async def send_main_menu(message: Message) -> None:
+async def send_main_menu(message: Message, session: AsyncSession | None = None, db_user: User | None = None) -> None:
+    language = await get_user_language(session, db_user.id) if session and db_user else 'ru'
     await message.answer_photo(
         photo=logo_file(),
-        caption='🔐 <b>NIF TIX</b> — безопасные сделки без лишнего шума.\n\nВыберите действие ниже 👇',
-        reply_markup=main_menu(),
+        caption=get_localized_text('main_caption', language),
+        reply_markup=main_menu(language),
         parse_mode='HTML',
     )
 
@@ -259,7 +329,7 @@ async def language_callback(callback: CallbackQuery, session: AsyncSession, db_u
         callback.message.chat.id,
         photo=logo_file(),
         caption=get_localized_text('settings_saved', language),
-        reply_markup=settings_menu(),
+        reply_markup=settings_menu(language),
         parse_mode='HTML',
     )
     await callback.answer()
@@ -304,18 +374,20 @@ async def menu_callback(callback: CallbackQuery, state: FSMContext, session: Asy
             callback.message.chat.id,
             photo=logo_file(),
             caption=get_localized_text('settings_saved', language),
-            reply_markup=settings_menu(),
+            reply_markup=settings_menu(language),
             parse_mode='HTML',
         )
         await callback.answer()
         return
     if action == 'menu_create_deal':
-        await replace_message_with_text('🎁 Шаг 1/4 — Выберите тип сделки', deal_type_menu())
+        language = await get_user_language(session, db_user.id)
+        await replace_message_with_text(get_localized_text('create_step1', language), deal_type_menu())
         await state.set_state(DealCreation.choose_type)
         await callback.answer()
         return
     if action == 'menu_deal_type_gift':
-        await replace_message_with_text('🇷🇺 Шаг 2/4 — Выберите валюту', deal_currency_menu())
+        language = await get_user_language(session, db_user.id)
+        await replace_message_with_text(get_localized_text('create_step2', language), deal_currency_menu())
         await state.set_state(DealCreation.choose_currency)
         await callback.answer()
         return
@@ -327,7 +399,8 @@ async def menu_callback(callback: CallbackQuery, state: FSMContext, session: Asy
             await callback.answer('Неподдерживаемая валюта.')
             return
         await state.update_data(currency=currency.value)
-        await replace_message_with_text('💰 Шаг 3/4 — Укажите сумму сделки\nВведите только число, без названия валюты.')
+        language = await get_user_language(session, db_user.id)
+        await replace_message_with_text(get_localized_text('step3', language), parse_mode='HTML')
         await state.set_state(DealCreation.enter_amount)
         await callback.answer()
         return
@@ -340,31 +413,28 @@ async def menu_callback(callback: CallbackQuery, state: FSMContext, session: Asy
             '5. Покупатель подтверждает получение\n'
             '6. Деньги зачисляются продавцу\n\n'
             '📖 Подробнее: https://telegra.ph/Kak-bezopasno-provodit-sdelki-cherez-NIFTIX-08-02',
-            main_menu(),
+            main_menu(await get_user_language(session, db_user.id)),
             parse_mode='HTML',
         )
         await callback.answer(cache_time=0)
         return
+    if action == 'menu_support':
+        language = await get_user_language(session, db_user.id)
+        await replace_message_with_text(get_localized_text('support_prompt', language))
+        await state.set_state(SupportStates.enter_message)
+        await callback.answer()
+        return
     if action == 'menu_channel':
-        await replace_message_with_photo('Наш канал: https://t.me/your_channel_link', main_menu(), parse_mode='HTML')
+        await replace_message_with_photo('Our channel: https://t.me/your_channel_link' if await get_user_language(session, db_user.id) == 'en' else 'Наш канал: https://t.me/your_channel_link', main_menu(await get_user_language(session, db_user.id)), parse_mode='HTML')
         await callback.answer()
         return
     if action == 'menu_profile':
         balance_repo = BalanceRepository(session)
         balances = await balance_repo.list_balances(db_user.id)
+        language = await get_user_language(session, db_user.id)
         await replace_message_with_photo(
-            (
-                f'<b>Профиль</b>\n'
-                f'ID: {db_user.id}\n'
-                f'Username: @{db_user.username or "не указан"}\n'
-                f'Завершенных сделок: {db_user.completed_deals or 0}\n'
-                f'Общий объем: {(db_user.total_volume or 0.0):.2f}\n\n'
-                f'<b>Баланс</b>\n{format_balance(balances) or "Баланс отсутствует."}\n\n'
-                f'Привязанная карта: {db_user.card_data or "не задана"}\n'
-                f'TON кошелек: {db_user.ton_wallet or "не задан"}\n'
-                f'Получатель Stars: {db_user.stars_recipient or "не задан"}'
-            ),
-            profile_menu(),
+            build_profile_caption(db_user, balances, language),
+            profile_menu(language),
             parse_mode='HTML',
         )
         await callback.answer()
@@ -372,13 +442,14 @@ async def menu_callback(callback: CallbackQuery, state: FSMContext, session: Asy
     if action == 'menu_balance':
         balance_repo = BalanceRepository(session)
         balances = await balance_repo.list_balances(db_user.id)
+        language = await get_user_language(session, db_user.id)
         await replace_message_with_photo(
             (
-                f'<b>Баланс всех валют</b>\n'
+                f'{get_localized_text("all_balances_title", language)}\n'
                 f'{format_all_balances(balances)}\n\n'
-                f'Нажмите «Назад», чтобы вернуться к профилю.'
+                f'{get_localized_text("back_to_profile_hint", language)}'
             ),
-            profile_menu(),
+            profile_menu(language),
             parse_mode='HTML',
         )
         await callback.answer()
@@ -387,23 +458,26 @@ async def menu_callback(callback: CallbackQuery, state: FSMContext, session: Asy
         language = await get_user_language(session, db_user.id)
         await replace_message_with_photo(
             f'{get_localized_text("settings_title", language)}\n\n{get_localized_text("settings_text", language)}',
-            settings_menu(),
+            settings_menu(language),
             parse_mode='HTML',
         )
         await callback.answer()
         return
     if action == 'menu_bind_card':
-        await replace_message_with_text('Отправьте данные карты, которые будут использоваться для сделок.')
+        language = await get_user_language(session, db_user.id)
+        await replace_message_with_text(get_localized_text('bind_card_prompt', language))
         await state.set_state(ProfileUpdate.set_card)
         await callback.answer()
         return
     if action == 'menu_bind_wallet':
-        await replace_message_with_text('Отправьте TON кошелек, например: EQ...')
+        language = await get_user_language(session, db_user.id)
+        await replace_message_with_text(get_localized_text('bind_wallet_prompt', language))
         await state.set_state(ProfileUpdate.set_wallet)
         await callback.answer()
         return
     if action == 'menu_bind_stars':
-        await replace_message_with_text('Отправьте получателя Stars, например: @stars_receiver')
+        language = await get_user_language(session, db_user.id)
+        await replace_message_with_text(get_localized_text('bind_stars_prompt', language))
         await state.set_state(ProfileUpdate.set_stars)
         await callback.answer()
         return
@@ -473,8 +547,8 @@ async def menu_callback(callback: CallbackQuery, state: FSMContext, session: Asy
     if action == 'menu_cancel' or action == 'menu_back':
         await state.clear()
         await replace_message_with_photo(
-            '🔐 <b>NIF TIX</b> — безопасные сделки без лишнего шума.\n\nВыберите действие ниже 👇',
-            main_menu(),
+            get_localized_text('main_caption', await get_user_language(session, db_user.id)),
+            main_menu(await get_user_language(session, db_user.id)),
             parse_mode='HTML',
         )
         await callback.answer()
@@ -485,20 +559,11 @@ async def menu_callback(callback: CallbackQuery, state: FSMContext, session: Asy
 async def send_profile(message: Message, session: AsyncSession, db_user: User) -> None:
     balance_repo = BalanceRepository(session)
     balances = await balance_repo.list_balances(db_user.id)
+    language = await get_user_language(session, db_user.id)
     await message.answer_photo(
         photo=logo_file(),
-        caption=(
-            f'<b>Профиль</b>\n'
-            f'ID: {db_user.id}\n'
-            f'Username: @{db_user.username or "не указан"}\n'
-            f'Завершенных сделок: {db_user.completed_deals or 0}\n'
-            f'Общий объем: {(db_user.total_volume or 0.0):.2f}\n\n'
-            f'<b>Баланс</b>\n{format_balance(balances)}\n\n'
-            f'Привязанная карта: {db_user.card_data or "не задана"}\n'
-            f'TON кошелек: {db_user.ton_wallet or "не задан"}\n'
-            f'Получатель Stars: {db_user.stars_recipient or "не задан"}'
-        ),
-        reply_markup=profile_menu(),
+        caption=build_profile_caption(db_user, balances, language),
+        reply_markup=profile_menu(language),
         parse_mode='HTML',
     )
 
@@ -703,10 +768,73 @@ async def process_profile_text(message: Message, state: FSMContext, session: Asy
     await message.answer('Выберите действие из меню.', reply_markup=main_menu())
 
 
+async def support_message(message: Message, state: FSMContext, session: AsyncSession, db_user: User) -> None:
+    text = (message.text or '').strip()
+    if not text:
+        await message.answer('Отправьте текстовое сообщение для поддержки.')
+        return
+    language = await get_user_language(session, db_user.id)
+    username = f'@{db_user.username}' if db_user.username else 'username не указан'
+    admin_text = (
+        '🆘 <b>Новое обращение в поддержку</b>\n\n'
+        f'Клиент: {username}\n'
+        f'ID: <code>{db_user.id}</code>\n\n'
+        f'Сообщение:\n{text}'
+    )
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text='✉️ Ответить', callback_data=f'support_reply:{db_user.id}')
+    ]])
+    for admin_id in set(config.ADMIN_IDS) | set(config.SUPER_ADMIN_IDS):
+        try:
+            await message.bot.send_message(admin_id, admin_text, reply_markup=reply_markup, parse_mode='HTML')
+        except Exception:
+            logger.warning('Не удалось отправить обращение администратору %s', admin_id)
+    await message.answer(get_localized_text('support_sent', language), reply_markup=main_menu())
+    await state.clear()
+
+
+async def support_reply_start(callback: CallbackQuery, state: FSMContext, db_user: User, is_admin: bool, is_super_admin: bool) -> None:
+    if not (is_admin or is_super_admin or db_user.role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}):
+        await callback.answer('⛔ Недостаточно прав.')
+        return
+    _, user_id = parse_callback_data(callback.data or '')
+    if not user_id.isdigit():
+        await callback.answer('Некорректный пользователь.')
+        return
+    await state.update_data(support_user_id=int(user_id))
+    await callback.message.answer(f'Напишите ответ пользователю {user_id}.')
+    await state.set_state(SupportStates.admin_reply)
+    await callback.answer()
+
+
+async def support_reply_send(message: Message, state: FSMContext, db_user: User) -> None:
+    if db_user.role not in {UserRole.ADMIN, UserRole.SUPER_ADMIN} and db_user.id not in {*config.ADMIN_IDS, *config.SUPER_ADMIN_IDS}:
+        await message.answer('⛔ Недостаточно прав.')
+        await state.clear()
+        return
+    data = await state.get_data()
+    user_id = data.get('support_user_id')
+    text = (message.text or '').strip()
+    if not user_id or not text:
+        await message.answer('Ответ не отправлен: нет пользователя или текста.')
+        await state.clear()
+        return
+    await message.bot.send_message(int(user_id), f'🆘 <b>Ответ поддержки</b>\n\n{text}', parse_mode='HTML')
+    await message.answer('✅ Ответ отправлен.')
+    await state.clear()
+
+
 async def save_card(message: Message, state: FSMContext, session: AsyncSession, db_user: User) -> None:
-    db_user.card_data = message.text.strip()
+    value = (message.text or '').strip()
+    if not value:
+        await message.answer('Отправьте непустые реквизиты карты.')
+        return
+    updated_user = await UserRepository(session).update_requisites(db_user.id, card_data=value)
+    if updated_user is not None:
+        db_user.card_data = updated_user.card_data
     await session.commit()
-    await message.answer('✅ Карта сохранена.', reply_markup=profile_menu())
+    language = await get_user_language(session, db_user.id)
+    await message.answer(get_localized_text('card_saved', language), reply_markup=profile_menu(language))
     await state.clear()
 
 
@@ -716,16 +844,30 @@ async def cancel_fsm(message: Message, state: FSMContext) -> None:
 
 
 async def save_wallet(message: Message, state: FSMContext, session: AsyncSession, db_user: User) -> None:
-    db_user.ton_wallet = message.text.strip()
+    value = (message.text or '').strip()
+    if not value:
+        await message.answer('Отправьте непустой TON кошелек.')
+        return
+    updated_user = await UserRepository(session).update_requisites(db_user.id, ton_wallet=value)
+    if updated_user is not None:
+        db_user.ton_wallet = updated_user.ton_wallet
     await session.commit()
-    await message.answer('✅ TON кошелек сохранен.', reply_markup=profile_menu())
+    language = await get_user_language(session, db_user.id)
+    await message.answer(get_localized_text('wallet_saved', language), reply_markup=profile_menu(language))
     await state.clear()
 
 
 async def save_stars(message: Message, state: FSMContext, session: AsyncSession, db_user: User) -> None:
-    db_user.stars_recipient = message.text.strip()
+    value = (message.text or '').strip()
+    if not value:
+        await message.answer('Отправьте непустого получателя Stars.')
+        return
+    updated_user = await UserRepository(session).update_requisites(db_user.id, stars_recipient=value)
+    if updated_user is not None:
+        db_user.stars_recipient = updated_user.stars_recipient
     await session.commit()
-    await message.answer('✅ Получатель Stars сохранен.', reply_markup=profile_menu())
+    language = await get_user_language(session, db_user.id)
+    await message.answer(get_localized_text('stars_saved', language), reply_markup=profile_menu(language))
     await state.clear()
 
 
@@ -1285,19 +1427,28 @@ async def remove_admin(message: Message, is_super_admin: bool, session: AsyncSes
     await message.answer(f'Пользователь {parts[1]} удален из администраторов.')
 
 
-async def export_db(message: Message, is_super_admin: bool, session: AsyncSession) -> None:
-    if not await ensure_super_admin(message, is_super_admin):
-        return
+async def export_db_file(session: AsyncSession) -> Path:
     import json
+    from tempfile import gettempdir
 
     data = {}
     for model in [User, Deal, Payment, WithdrawRequest, Balance]:
         rows = await session.execute(select(model))
-        data[model.__tablename__] = [row.__dict__ for row in rows.scalars().all()]
-    filename = f'db_export_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}.json'
+        cleaned_rows = []
+        for row in rows.scalars().all():
+            cleaned_rows.append({key: value for key, value in row.__dict__.items() if not key.startswith('_')})
+        data[model.__tablename__] = cleaned_rows
+    filename = Path(gettempdir()) / f'db_export_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}.json'
     with open(filename, 'w', encoding='utf-8') as f:
         json.dump(data, f, default=str, ensure_ascii=False, indent=2)
-    await message.answer(f'Экспорт базы данных завершен: {filename}')
+    return filename
+
+
+async def export_db(message: Message, is_super_admin: bool, session: AsyncSession) -> None:
+    if not await ensure_super_admin(message, is_super_admin):
+        return
+    filename = await export_db_file(session)
+    await message.answer_document(FSInputFile(str(filename)), caption='📦 Выгрузка базы данных')
 
 
 async def whoami(message: Message, session: AsyncSession, db_user: User, is_admin: bool, is_super_admin: bool) -> None:
@@ -1315,7 +1466,7 @@ async def whoami(message: Message, session: AsyncSession, db_user: User, is_admi
 
 
 async def broadcast_text(message: Message, state: FSMContext, db_user: User) -> None:
-    if db_user.role != UserRole.SUPER_ADMIN:
+    if db_user.role not in {UserRole.ADMIN, UserRole.SUPER_ADMIN} and db_user.id not in {*config.ADMIN_IDS, *config.SUPER_ADMIN_IDS}:
         await message.answer('⛔ Недостаточно прав.')
         await state.clear()
         return
@@ -1325,7 +1476,7 @@ async def broadcast_text(message: Message, state: FSMContext, db_user: User) -> 
 
 
 async def broadcast_confirm(message: Message, state: FSMContext, session: AsyncSession, db_user: User) -> None:
-    if db_user.role != UserRole.SUPER_ADMIN:
+    if db_user.role not in {UserRole.ADMIN, UserRole.SUPER_ADMIN} and db_user.id not in {*config.ADMIN_IDS, *config.SUPER_ADMIN_IDS}:
         await message.answer('⛔ Недостаточно прав.')
         await state.clear()
         return
@@ -1352,6 +1503,72 @@ async def admin_callback(callback: CallbackQuery, state: FSMContext, session: As
         await callback.answer('⛔ Недостаточно прав.')
         return
     data = callback.data or ''
+
+    if data == 'admin_stats':
+        total_users = await session.scalar(select(func.count()).select_from(User))
+        active_users = await session.scalar(select(func.count()).select_from(User).where(User.blocked == False))
+        total_deals = await session.scalar(select(func.count()).select_from(Deal))
+        completed_deals = await session.scalar(select(func.count()).select_from(Deal).where(Deal.status == DealStatus.COMPLETED))
+        withdraw_count = await session.scalar(select(func.count()).select_from(WithdrawRequest))
+        await callback.message.answer(
+            f'📊 <b>Статистика</b>\n\n'
+            f'Всего пользователей: {total_users or 0}\n'
+            f'Активных пользователей: {active_users or 0}\n'
+            f'Всего сделок: {total_deals or 0}\n'
+            f'Завершенных сделок: {completed_deals or 0}\n'
+            f'Количество выводов: {withdraw_count or 0}',
+            parse_mode='HTML',
+        )
+        await callback.answer()
+        return
+    if data == 'admin_users':
+        result = await session.execute(select(User).limit(30))
+        users = result.scalars().all()
+        if not users:
+            await callback.message.answer('Пользователей нет.')
+        else:
+            await callback.message.answer('\n'.join(
+                f'{user.id} | @{user.username or "-"} | {user.completed_deals or 0} сделок | {"🚫" if user.blocked else "✅"}'
+                for user in users
+            ))
+        await callback.answer()
+        return
+    if data == 'admin_balances':
+        result = await session.execute(select(Balance).limit(50))
+        balances = result.scalars().all()
+        if not balances:
+            await callback.message.answer('Балансы отсутствуют.')
+        else:
+            lines = []
+            for balance in balances:
+                user = await UserRepository(session).get(balance.user_id)
+                lines.append(f'{admin_user_label(user, balance.user_id)} | {balance.amount:.2f} {balance.currency.value}')
+            await callback.message.answer('💰 <b>Балансы</b>\n' + '\n'.join(lines), parse_mode='HTML')
+        await callback.answer()
+        return
+    if data == 'admin_blocked':
+        result = await session.execute(select(User).where(User.blocked == True).limit(50))
+        users = result.scalars().all()
+        if not users:
+            await callback.message.answer('Заблокированных пользователей нет.')
+        else:
+            await callback.message.answer('🚫 <b>Заблокированные</b>\n' + '\n'.join(
+                f'{user.id} | @{user.username or "-"}' for user in users
+            ), parse_mode='HTML')
+        await callback.answer()
+        return
+    if data == 'admin_settings':
+        await callback.message.answer(
+            '⚙️ <b>Админ-настройки</b>\n\n'
+            '/addadmin USER_ID — добавить админа\n'
+            '/removeadmin USER_ID — удалить админа\n'
+            '/block USER_ID — заблокировать\n'
+            '/unblock USER_ID — разблокировать\n'
+            '/exportdb — выгрузить базу данных',
+            parse_mode='HTML',
+        )
+        await callback.answer()
+        return
     if data == 'admin_payments':
         payments = await PaymentRepository(session).list_waiting()
         if not payments:
@@ -1361,11 +1578,11 @@ async def admin_callback(callback: CallbackQuery, state: FSMContext, session: As
         for payment in payments:
             buyer = await UserRepository(session).get(payment.buyer_id)
             deal_info = 'N/A'
-            if getattr(payment, 'deal', None):
-                try:
-                    deal_info = f"{payment.deal.deal_number} ({payment.deal.deal_code})"
-                except Exception:
-                    deal_info = 'N/A'
+            deal = getattr(payment, 'deal', None)
+            if deal is None and getattr(payment, 'deal_id', None) is not None:
+                deal = await session.get(Deal, payment.deal_id)
+            if deal is not None:
+                deal_info = f'{deal.deal_number} ({deal.deal_code})'
             await callback.message.answer(
                 (
                     f'Оплата #{payment.id}\n'
@@ -1379,6 +1596,14 @@ async def admin_callback(callback: CallbackQuery, state: FSMContext, session: As
                     [InlineKeyboardButton(text='❌ Отклонить оплату', callback_data=f'reject_payment:{payment.id}')],
                 ]),
             )
+        await callback.answer()
+        return
+    if data == 'admin_export_db':
+        if not (is_admin or is_super_admin or db_user.role in {UserRole.ADMIN, UserRole.SUPER_ADMIN} or db_user.id in {*config.ADMIN_IDS, *config.SUPER_ADMIN_IDS}):
+            await callback.answer('⛔ Недостаточно прав.', show_alert=True)
+            return
+        filename = await export_db_file(session)
+        await callback.message.answer_document(FSInputFile(str(filename)), caption='📦 Выгрузка базы данных')
         await callback.answer()
         return
     if data == 'admin_broadcast':
@@ -1500,6 +1725,8 @@ async def register_handlers(dp: Dispatcher) -> None:
     dp.message.register(cancel_fsm, StateFilter('*'), message_equals('⬅️ Назад'))
     # Explicit profile handler so button always opens profile when no FSM state is active
     dp.message.register(send_profile, StateFilter(None), message_equals('👤 Мой профиль'))
+    dp.message.register(support_message, SupportStates.enter_message)
+    dp.message.register(support_reply_send, SupportStates.admin_reply)
     dp.message.register(process_profile_text, StateFilter(None))
     dp.message.register(start_deal, message_equals('💼 Создать сделку'))
     dp.message.register(show_help_create, message_equals('📖 Как создать сделку'))
@@ -1529,4 +1756,5 @@ async def register_handlers(dp: Dispatcher) -> None:
     dp.callback_query.register(reject_payment, callback_data_startswith('reject_payment:'))
     dp.callback_query.register(withdraw_ok, callback_data_startswith('withdraw_ok:'))
     dp.callback_query.register(withdraw_reject, callback_data_startswith('withdraw_reject:'))
+    dp.callback_query.register(support_reply_start, callback_data_startswith('support_reply:'))
     dp.callback_query.register(admin_callback, callback_data_startswith('admin_'))

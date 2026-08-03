@@ -90,6 +90,33 @@ class UserRepository:
         return result.scalars().all()
 
 
+    async def update_requisites(
+        self,
+        user_id: int,
+        *,
+        card_data: str | None = None,
+        ton_wallet: str | None = None,
+        stars_recipient: str | None = None,
+    ) -> User | None:
+        user = await self.get(user_id)
+        if user is None:
+            return None
+        values = {}
+        if card_data is not None:
+            user.card_data = card_data
+            values['card_data'] = card_data
+        if ton_wallet is not None:
+            user.ton_wallet = ton_wallet
+            values['ton_wallet'] = ton_wallet
+        if stars_recipient is not None:
+            user.stars_recipient = stars_recipient
+            values['stars_recipient'] = stars_recipient
+        if values and not self._use_memory():
+            await self.session.execute(update(User).where(User.id == user_id).values(**values))
+        await self.session.flush()
+        return user
+
+
 class BalanceRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
