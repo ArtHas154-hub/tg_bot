@@ -1,8 +1,20 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
-def main_menu() -> InlineKeyboardMarkup:
+def main_menu(language: str = 'ru') -> InlineKeyboardMarkup:
+    texts = {
+        'ru': ('💼 Создать сделку', '❓ Как проходит сделка?', '📢 Наш канал', '🆘 Поддержка', '👤 Мой профиль', '⚙️ Настройки'),
+        'en': ('💼 Create deal', '❓ How does a deal work?', '📢 Our channel', '🆘 Support', '👤 My profile', '⚙️ Settings'),
+    }.get(language, {
+        'ru': ('💼 Создать сделку', '❓ Как проходит сделка?', '📢 Наш канал', '🆘 Поддержка', '👤 Мой профиль', '⚙️ Настройки'),
+    }['ru'])
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=texts[0], callback_data='menu_create_deal')],
+        [InlineKeyboardButton(text=texts[1], url='https://telegra.ph/Kak-bezopasno-provodit-sdelki-cherez-NIFTIX-08-02')],
+        [InlineKeyboardButton(text=texts[2], callback_data='menu_channel')],
+        [InlineKeyboardButton(text=texts[3], callback_data='menu_support')],
+        [InlineKeyboardButton(text=texts[4], callback_data='menu_profile')],
+        [InlineKeyboardButton(text=texts[5], callback_data='menu_settings')],
         [InlineKeyboardButton(text='💼 Создать сделку', callback_data='menu_create_deal')],
         [InlineKeyboardButton(text='❓ Как проходит сделка?', url='https://telegra.ph/Kak-bezopasno-provodit-sdelki-cherez-NIFTIX-08-02')],
         [InlineKeyboardButton(text='📢 Наш канал', callback_data='menu_channel')],
@@ -12,14 +24,20 @@ def main_menu() -> InlineKeyboardMarkup:
     ])
 
 
-def profile_menu() -> InlineKeyboardMarkup:
+def profile_menu(language: str = 'ru') -> InlineKeyboardMarkup:
+    texts = {
+        'ru': ('💰 Баланс', '💳 Привязать карту', '💎 Привязать TON кошелек', '⭐ Указать получателя Stars', '💸 Вывести баланс', '⬅️ Назад'),
+        'en': ('💰 Balance', '💳 Bind card', '💎 Bind TON wallet', '⭐ Set Stars recipient', '💸 Withdraw balance', '⬅️ Back'),
+    }.get(language, {
+        'ru': ('💰 Баланс', '💳 Привязать карту', '💎 Привязать TON кошелек', '⭐ Указать получателя Stars', '💸 Вывести баланс', '⬅️ Назад'),
+    }['ru'])
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='💰 Баланс', callback_data='menu_balance')],
-        [InlineKeyboardButton(text='💳 Привязать карту', callback_data='menu_bind_card')],
-        [InlineKeyboardButton(text='💎 Привязать TON кошелек', callback_data='menu_bind_wallet')],
-        [InlineKeyboardButton(text='⭐ Указать получателя Stars', callback_data='menu_bind_stars')],
-        [InlineKeyboardButton(text='💸 Вывести баланс', callback_data='menu_withdraw')],
-        [InlineKeyboardButton(text='⬅️ Назад', callback_data='menu_back')],
+        [InlineKeyboardButton(text=texts[0], callback_data='menu_balance')],
+        [InlineKeyboardButton(text=texts[1], callback_data='menu_bind_card')],
+        [InlineKeyboardButton(text=texts[2], callback_data='menu_bind_wallet')],
+        [InlineKeyboardButton(text=texts[3], callback_data='menu_bind_stars')],
+        [InlineKeyboardButton(text=texts[4], callback_data='menu_withdraw')],
+        [InlineKeyboardButton(text=texts[5], callback_data='menu_back')],
     ])
 
 
