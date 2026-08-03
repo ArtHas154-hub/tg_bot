@@ -15,6 +15,12 @@ def main_menu(language: str = 'ru') -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=texts[3], callback_data='menu_support')],
         [InlineKeyboardButton(text=texts[4], callback_data='menu_profile')],
         [InlineKeyboardButton(text=texts[5], callback_data='menu_settings')],
+        [InlineKeyboardButton(text='💼 Создать сделку', callback_data='menu_create_deal')],
+        [InlineKeyboardButton(text='❓ Как проходит сделка?', url='https://telegra.ph/Kak-bezopasno-provodit-sdelki-cherez-NIFTIX-08-02')],
+        [InlineKeyboardButton(text='📢 Наш канал', callback_data='menu_channel')],
+        [InlineKeyboardButton(text='🆘 Поддержка', callback_data='menu_support')],
+        [InlineKeyboardButton(text='👤 Мой профиль', callback_data='menu_profile')],
+        [InlineKeyboardButton(text='⚙️ Настройки', callback_data='menu_settings')],
     ])
 
 

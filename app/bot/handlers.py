@@ -435,6 +435,17 @@ async def menu_callback(callback: CallbackQuery, state: FSMContext, session: Asy
         await replace_message_with_photo(
             build_profile_caption(db_user, balances, language),
             profile_menu(language),
+            (
+                f'<b>Профиль</b>\n'
+                f'ID: {db_user.id}\n'
+                f'Username: @{db_user.username or "не указан"}\n'
+                f'Завершенных сделок: {db_user.completed_deals or 0}\n\n'
+                f'<b>Баланс</b>\n{format_balance(balances) or "Баланс отсутствует."}\n\n'
+                f'Привязанная карта: {db_user.card_data or "не задана"}\n'
+                f'TON кошелек: {db_user.ton_wallet or "не задан"}\n'
+                f'Получатель Stars: {db_user.stars_recipient or "не задан"}'
+            ),
+            profile_menu(),
             parse_mode='HTML',
         )
         await callback.answer()
@@ -564,6 +575,17 @@ async def send_profile(message: Message, session: AsyncSession, db_user: User) -
         photo=logo_file(),
         caption=build_profile_caption(db_user, balances, language),
         reply_markup=profile_menu(language),
+        caption=(
+            f'<b>Профиль</b>\n'
+            f'ID: {db_user.id}\n'
+            f'Username: @{db_user.username or "не указан"}\n'
+            f'Завершенных сделок: {db_user.completed_deals or 0}\n\n'
+            f'<b>Баланс</b>\n{format_balance(balances)}\n\n'
+            f'Привязанная карта: {db_user.card_data or "не задана"}\n'
+            f'TON кошелек: {db_user.ton_wallet or "не задан"}\n'
+            f'Получатель Stars: {db_user.stars_recipient or "не задан"}'
+        ),
+        reply_markup=profile_menu(),
         parse_mode='HTML',
     )
 
@@ -1601,6 +1623,8 @@ async def admin_callback(callback: CallbackQuery, state: FSMContext, session: As
     if data == 'admin_export_db':
         if not (is_admin or is_super_admin or db_user.role in {UserRole.ADMIN, UserRole.SUPER_ADMIN} or db_user.id in {*config.ADMIN_IDS, *config.SUPER_ADMIN_IDS}):
             await callback.answer('⛔ Недостаточно прав.', show_alert=True)
+        if not (is_super_admin or db_user.role == UserRole.SUPER_ADMIN or db_user.id in config.SUPER_ADMIN_IDS):
+            await callback.answer('⛔ Только суперадминистратор может выгружать DB.', show_alert=True)
             return
         filename = await export_db_file(session)
         await callback.message.answer_document(FSInputFile(str(filename)), caption='📦 Выгрузка базы данных')
