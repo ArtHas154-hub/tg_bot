@@ -52,19 +52,24 @@ def settings_menu(language: str = 'ru') -> InlineKeyboardMarkup:
     ])
 
 
-def deal_type_menu() -> InlineKeyboardMarkup:
+def deal_type_menu(language: str = 'ru') -> InlineKeyboardMarkup:
+    gift_text = '🎁 Gifts' if language == 'en' else '🎁 Подарки'
+    back_text = '⬅️ Back' if language == 'en' else '⬅️ Назад'
+    cancel_text = '❌ Cancel' if language == 'en' else '❌ Отмена'
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='🎁 Подарки', callback_data='menu_deal_type_gift')],
-        [InlineKeyboardButton(text='⬅️ Назад', callback_data='menu_back'), InlineKeyboardButton(text='❌ Отмена', callback_data='menu_cancel')],
+        [InlineKeyboardButton(text=gift_text, callback_data='menu_deal_type_gift')],
+        [InlineKeyboardButton(text=back_text, callback_data='menu_back'), InlineKeyboardButton(text=cancel_text, callback_data='menu_cancel')],
     ])
 
 
-def deal_currency_menu() -> InlineKeyboardMarkup:
+def deal_currency_menu(language: str = 'ru') -> InlineKeyboardMarkup:
+    back_text = '⬅️ Back' if language == 'en' else '⬅️ Назад'
+    cancel_text = '❌ Cancel' if language == 'en' else '❌ Отмена'
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='🇷🇺 RUB', callback_data='menu_currency_RUB'), InlineKeyboardButton(text='🇪🇺 EUR', callback_data='menu_currency_EUR'), InlineKeyboardButton(text='🇰🇿 KZT', callback_data='menu_currency_KZT')],
         [InlineKeyboardButton(text='🇺🇿 UZS', callback_data='menu_currency_UZS'), InlineKeyboardButton(text='🇺🇦 UAH', callback_data='menu_currency_UAH'), InlineKeyboardButton(text='🇧🇾 BYN', callback_data='menu_currency_BYN')],
         [InlineKeyboardButton(text='💎 TON', callback_data='menu_currency_TON'), InlineKeyboardButton(text='⭐ Stars', callback_data='menu_currency_STARS')],
-        [InlineKeyboardButton(text='⬅️ Назад', callback_data='menu_back'), InlineKeyboardButton(text='❌ Отмена', callback_data='menu_cancel')],
+        [InlineKeyboardButton(text=back_text, callback_data='menu_back'), InlineKeyboardButton(text=cancel_text, callback_data='menu_cancel')],
     ])
 
 

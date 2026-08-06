@@ -26,7 +26,7 @@ async def main() -> None:
     await register_handlers(dp)
 
     logger.info('Запуск бота...')
-    await dp.start_polling(bot, polling_timeout=0)
+    await dp.start_polling(bot, polling_timeout=1)
 
 
 async def setup_bot_menu(bot: Bot) -> None:

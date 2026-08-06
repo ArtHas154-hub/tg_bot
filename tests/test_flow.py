@@ -201,3 +201,36 @@ async def test_confirm_payment_sends_seller_transfer_button():
 
     assert any('Передайте подарок покупателю' in (text or '') for _, text, _ in bot.sent)
     assert any('seller_transferred' in str(kwargs.get('reply_markup')) for _, _, kwargs in bot.sent)
+
+@pytest.mark.asyncio
+async def test_db_export_import_round_trips_core_tables():
+    from app.bot.handlers import export_db_file, import_db_payload
+    import json
+
+    session = InMemorySession()
+    seller = User(id=901, username='seller')
+    buyer = User(id=902, username='buyer')
+    session.add(seller)
+    session.add(buyer)
+    deal = await DealRepository(session).create(seller.id, Currency.RUB, 500.0, 'Gift', 'COMMENT')
+    payment = Payment(deal_id=deal.id, buyer_id=buyer.id, amount=500.0, currency=Currency.RUB, comment='COMMENT', status=PaymentStatus.WAITING)
+    session.add(payment)
+    request = await WithdrawRepository(session).create(seller.id, Currency.RUB, 100.0)
+    await BalanceRepository(session).change(seller.id, Currency.RUB, 100.0)
+
+    export_path = await export_db_file(session)
+    payload = json.loads(export_path.read_text(encoding='utf-8'))
+
+    assert len(payload['users']) >= 2
+    assert len(payload['deals']) >= 1
+    assert len(payload['payments']) >= 1
+    assert len(payload['withdraw_requests']) >= 1
+    assert len(payload['balances']) >= 1
+
+    counts = await import_db_payload(session, payload)
+
+    assert counts['users'] >= 2
+    assert counts['deals'] >= 1
+    assert counts['payments'] >= 1
+    assert counts['withdraw_requests'] >= 1
+    assert counts['balances'] >= 1
