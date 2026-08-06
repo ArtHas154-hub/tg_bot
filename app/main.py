@@ -6,11 +6,15 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramNetworkError
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, MenuButtonCommands
+from aiogram.utils.backoff import BackoffConfig
 
 from app.bot.handlers import register_handlers
 from app.bot.middlewares import DatabaseMiddleware, UserProfileMiddleware
 from app.core.config import BOT_TOKEN
 from app.core.logger import logger
+
+POLLING_TIMEOUT_SECONDS = 0
+POLLING_BACKOFF = BackoffConfig(min_delay=0.25, max_delay=1.0, factor=1.2, jitter=0.0)
 
 
 async def main() -> None:
@@ -28,7 +32,11 @@ async def main() -> None:
         await register_handlers(dp)
 
         logger.info('Запуск бота...')
-        await dp.start_polling(bot, polling_timeout=1)
+        await dp.start_polling(
+            bot,
+            polling_timeout=POLLING_TIMEOUT_SECONDS,
+            backoff_config=POLLING_BACKOFF,
+        )
     except TelegramNetworkError as exc:
         logger.error('Не удалось подключиться к Telegram API: %s', exc)
         raise
