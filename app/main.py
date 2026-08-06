@@ -3,6 +3,7 @@ import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.exceptions import TelegramNetworkError
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, MenuButtonCommands
@@ -12,10 +13,18 @@ from app.bot.middlewares import DatabaseMiddleware, UserProfileMiddleware
 from app.core.config import BOT_TOKEN
 from app.core.logger import logger
 
+MAX_BOT_LATENCY_SECONDS = 1.0
+POLLING_TIMEOUT_SECONDS = 1
+
 
 async def main() -> None:
     storage = MemoryStorage()
-    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
+    session = AiohttpSession(timeout=MAX_BOT_LATENCY_SECONDS)
+    bot = Bot(
+        token=BOT_TOKEN,
+        session=session,
+        default=DefaultBotProperties(parse_mode='HTML'),
+    )
     dp = Dispatcher(storage=storage)
     dp.message.middleware(DatabaseMiddleware())
     dp.message.middleware(UserProfileMiddleware())
@@ -27,8 +36,11 @@ async def main() -> None:
         await setup_bot_menu(bot)
         await register_handlers(dp)
 
-        logger.info('Запуск бота...')
-        await dp.start_polling(bot, polling_timeout=1)
+        logger.info(
+            'Запуск бота с максимальной задержкой %.0f мс...',
+            MAX_BOT_LATENCY_SECONDS * 1000,
+        )
+        await dp.start_polling(bot, polling_timeout=POLLING_TIMEOUT_SECONDS)
     except TelegramNetworkError as exc:
         logger.error('Не удалось подключиться к Telegram API: %s', exc)
         raise
