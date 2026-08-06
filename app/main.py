@@ -39,6 +39,8 @@ async def main() -> None:
         await setup_bot_menu(bot)
         await register_handlers(dp)
 
+        polling_timeout_ms = POLLING_TIMEOUT_SECONDS * 1000
+        logger.info(f'Запуск бота с polling timeout {polling_timeout_ms} мс...')
         logger.info(
             'Запуск бота с polling timeout %.0f мс...',
             POLLING_TIMEOUT_SECONDS * 1000,
