@@ -7,16 +7,15 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.exceptions import TelegramNetworkError
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, MenuButtonCommands
+from aiogram.utils.backoff import BackoffConfig
 
 from app.bot.handlers import register_handlers
 from app.bot.middlewares import DatabaseMiddleware, UserProfileMiddleware
 from app.core.config import BOT_TOKEN
 from app.core.logger import logger
 
-POLLING_TIMEOUT_SECONDS = 1
-TELEGRAM_API_TIMEOUT_SECONDS = 10.0
-MAX_BOT_LATENCY_SECONDS = 1.0
-POLLING_TIMEOUT_SECONDS = 1
+POLLING_TIMEOUT_SECONDS = 0
+POLLING_BACKOFF = BackoffConfig(min_delay=0.25, max_delay=1.0, factor=1.2, jitter=0.0)
 
 
 async def main() -> None:
