@@ -25,6 +25,14 @@ class BroadcastStates(StatesGroup):
     confirm = State()
 
 
+class ImportDBStates(StatesGroup):
+    wait_file = State()
+
+
+class AdminUserBroadcastStates(StatesGroup):
+    wait_message = State()
+
+
 class SupportStates(StatesGroup):
     enter_message = State()
     admin_reply = State()

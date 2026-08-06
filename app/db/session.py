@@ -1,3 +1,5 @@
+import re
+
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -33,9 +35,46 @@ class InMemoryStore:
 IN_MEMORY_STORE = InMemoryStore()
 
 
+class _InMemoryScalarResult:
+    def __init__(self, values):
+        self._values = values
+
+    def all(self):
+        return self._values
+
+    def first(self):
+        return self._values[0] if self._values else None
+
+    def scalar_one_or_none(self):
+        return self._values[0] if self._values else None
+
+
+class _InMemoryResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+    def scalars(self):
+        scalar_values = []
+        for row in self._rows:
+            if isinstance(row, tuple):
+                scalar_values.append(row[0] if len(row) == 1 else row)
+            else:
+                scalar_values.append(row)
+        return _InMemoryScalarResult(scalar_values)
+
+
 class InMemorySession:
     def __init__(self) -> None:
         self.store = IN_MEMORY_STORE
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
 
     def add(self, obj: object) -> None:
         from app.db.models import AdminLog, Balance, Deal, Payment, Setting, User, WithdrawRequest
@@ -66,6 +105,11 @@ class InMemorySession:
             if request_id is None:
                 request_id = len(self.store.withdraws) + 1
                 obj.id = request_id
+            elif request_id in self.store.withdraws:
+                self.store.withdraws[request_id] = obj
+                return
+            if getattr(obj, 'status', None) is None:
+                obj.status = WithdrawStatus.PENDING
             self.store.withdraws[request_id] = obj
         elif isinstance(obj, Setting):
             self.store.settings[obj.key] = obj
@@ -80,6 +124,132 @@ class InMemorySession:
 
     async def close(self) -> None:
         return None
+
+    async def execute(self, statement):
+        from app.db.models import Balance, Deal, Payment, User, WithdrawRequest
+
+        def _filter_rows(model, rows):
+            statement_text = str(statement).lower()
+            if model is User:
+                if 'blocked = false' in statement_text or 'blocked=false' in statement_text:
+                    rows = [row for row in rows if not getattr(row, 'blocked', False)]
+                if 'blocked is true' in statement_text or 'blocked=true' in statement_text:
+                    rows = [row for row in rows if getattr(row, 'blocked', False)]
+                if 'blocked = true' in statement_text or 'blocked=true' in statement_text:
+                    rows = [row for row in rows if getattr(row, 'blocked', False)]
+                match = re.search(r'user_id\s*=\s*(\d+)', statement_text)
+                if match:
+                    target_id = int(match.group(1))
+                    rows = [row for row in rows if getattr(row, 'id', None) == target_id]
+            if model is Balance:
+                match = re.search(r'user_id\s*=\s*(\d+)', statement_text)
+                if match:
+                    target_id = int(match.group(1))
+                    rows = [row for row in rows if getattr(row, 'user_id', None) == target_id]
+            return rows
+
+        if hasattr(statement, 'column_descriptions'):
+            raw_columns = getattr(statement, '_raw_columns', ())
+            if not raw_columns:
+                return _InMemoryResult([])
+
+            target = getattr(statement, 'get_final_froms', lambda: [])()
+            froms = target or []
+            model = froms[0].entity if froms and hasattr(froms[0], 'entity') else None
+            if model is None:
+                model = getattr(statement, '_from_obj', None)
+                if model is not None and hasattr(model, 'entity'):
+                    model = model.entity
+
+            if model in {User, Deal, Balance, Payment, WithdrawRequest}:
+                items = _filter_rows(model, list(self._iter_model_rows(model)))
+                if hasattr(statement, 'limit') and statement.limit is not None:
+                    items = items[:statement.limit]
+                if len(raw_columns) == 1 and getattr(raw_columns[0], 'name', None) == 'id':
+                    return _InMemoryResult([(item.id if hasattr(item, 'id') else item,) for item in items])
+                return _InMemoryResult([(item,) for item in items])
+
+            raw_column = raw_columns[0]
+            if raw_column is not None and hasattr(raw_column, 'name'):
+                column_name = raw_column.name
+                if model is User:
+                    values = [getattr(obj, column_name) for obj in _filter_rows(model, list(self.store.users.values()))]
+                    if hasattr(statement, 'limit') and statement.limit is not None:
+                        values = values[:statement.limit]
+                    return _InMemoryResult([(value,) for value in values])
+
+            return _InMemoryResult([])
+
+        return _InMemoryResult([])
+
+    async def scalar(self, statement):
+        from app.db.models import Balance, Deal, Payment, User, WithdrawRequest
+        from sqlalchemy import func
+
+        columns = getattr(statement, '_raw_columns', ())
+        if not columns:
+            return None
+
+        first = columns[0]
+        froms = getattr(statement, 'get_final_froms', lambda: [])()
+        model = froms[0].entity if froms and hasattr(froms[0], 'entity') else None
+
+        if model is None:
+            model = getattr(statement, '_from_obj', None)
+            if model is not None and hasattr(model, 'entity'):
+                model = model.entity
+
+        stmt_text = str(statement).lower()
+        if model is User:
+            filtered = [user for user in self.store.users.values() if not getattr(user, 'blocked', False)] if 'blocked = false' in stmt_text or 'blocked=false' in stmt_text else list(self.store.users.values())
+            if 'blocked is true' in stmt_text or 'blocked=true' in stmt_text:
+                filtered = [user for user in self.store.users.values() if getattr(user, 'blocked', False)]
+            return len(filtered)
+
+        if model is Deal:
+            return len(self.store.deals)
+
+        if model is Balance:
+            return len(self.store.balances)
+
+        if model is WithdrawRequest:
+            return len(self.store.withdraws)
+
+        if model is Payment:
+            return len(self.store.payments)
+
+        if hasattr(first, 'name') and first.name == 'count_1':
+            return len(self.store.users)
+
+        if hasattr(first, 'expr') and getattr(first.expr, 'name', None) == 'count_1':
+            return len(self.store.users)
+
+        for table_name, store in {
+            'users': self.store.users,
+            'deals': self.store.deals,
+            'balances': self.store.balances,
+            'withdraw_requests': self.store.withdraws,
+            'payments': self.store.payments,
+        }.items():
+            if table_name in stmt_text:
+                return len(store)
+
+        return None
+
+    def _iter_model_rows(self, model):
+        from app.db.models import Balance, Deal, Payment, User, WithdrawRequest
+
+        if model is User:
+            return list(self.store.users.values())
+        if model is Deal:
+            return list(self.store.deals.values())
+        if model is Balance:
+            return [value for value in self.store.balances.values()]
+        if model is Payment:
+            return list(self.store.payments.values())
+        if model is WithdrawRequest:
+            return list(self.store.withdraws.values())
+        return []
 
     async def get(self, model, pk):
         # Minimal support for session.get(model, pk) in in-memory tests

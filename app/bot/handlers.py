@@ -1,7 +1,9 @@
 from __future__ import annotations
-from datetime import datetime
+import asyncio
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 from aiogram import Dispatcher
 from aiogram.filters import CommandStart, Command
@@ -27,16 +29,22 @@ from app.bot.keyboards import (
     profile_menu,
     seller_transfer_menu,
     settings_menu,
+    stats_period_menu,
+    user_action_menu,
     withdraw_confirm_menu,
 )
 from app.bot.states import (
+    AdminUserBroadcastStates,
     BroadcastStates,
     DealCreation,
+    ImportDBStates,
     ProfileUpdate,
     SupportStates,
     WithdrawRequestStates,
 )
 from app.bot.utils import build_payment_comment, format_balance
+
+LANGUAGE_CACHE: dict[int, str] = {}
 from app.core import config, logger
 from app.db.models import (
     Balance,
@@ -52,6 +60,7 @@ from app.db.models import (
 )
 
 LOGO_PATH = Path(__file__).resolve().parents[2] / 'img' / 'logo.png'
+MIN_DEAL_AMOUNT = 249.0
 
 
 def logo_file() -> FSInputFile:
@@ -107,13 +116,44 @@ def get_deal_title(deal: Deal) -> str:
     return f'Сделка №{deal.deal_number}'
 
 
+def get_minimum_amount_for_currency(currency: Currency) -> float:
+    minimums = {
+        Currency.RUB: 249.0,
+        Currency.EUR: 2.69,
+        Currency.KZT: 1470.0,
+        Currency.UZS: 37160.0,
+        Currency.UAH: 139.0,
+        Currency.BYN: 9.06,
+        Currency.TON: 0.88,
+        Currency.STARS: 160.0,
+    }
+    return minimums.get(currency, 249.0)
+
+
+def get_minimum_amount_text(currency: Currency) -> str:
+    minimums = {
+        Currency.RUB: '249 RUB',
+        Currency.EUR: '2.69 EUR',
+        Currency.KZT: '1 470 KZT',
+        Currency.UZS: '37 160 UZS',
+        Currency.UAH: '139 UAH',
+        Currency.BYN: '9.06 BYN',
+        Currency.TON: '0.88 TON',
+        Currency.STARS: '160 Stars',
+    }
+    return minimums.get(currency, '249 RUB')
+
+
 def build_profile_caption(db_user: User, balances: list[Balance], language: str) -> str:
     not_set = get_localized_text('not_set', language)
+    admin_label = ''
+    if getattr(db_user, 'role', UserRole.USER) in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
+        admin_label = '\n👑 Админ'
     return (
         f'{get_localized_text("profile_title", language)}\n'
         f'ID: {db_user.id}\n'
         f'Username: @{db_user.username or not_set}\n'
-        f'{get_localized_text("completed_deals", language)}: {db_user.completed_deals or 0}\n\n'
+        f'{get_localized_text("completed_deals", language)}: {db_user.completed_deals or 0}{admin_label}\n\n'
         f'{get_localized_text("balance_title", language)}\n{format_balance(balances) or not_set}\n\n'
         f'{get_localized_text("card_label", language)}: {db_user.card_data or not_set}\n'
         f'{get_localized_text("wallet_label", language)}: {db_user.ton_wallet or not_set}\n'
@@ -122,8 +162,13 @@ def build_profile_caption(db_user: User, balances: list[Balance], language: str)
 
 
 async def get_user_language(session: AsyncSession, user_id: int) -> str:
+    cached = LANGUAGE_CACHE.get(user_id)
+    if cached:
+        return cached
     lang = await SettingsRepository(session).get(f'user_lang:{user_id}')
-    return lang or 'ru'
+    resolved = lang or 'ru'
+    LANGUAGE_CACHE[user_id] = resolved
+    return resolved
 
 
 async def set_user_language(session: AsyncSession, user_id: int, lang: str) -> None:
@@ -136,7 +181,7 @@ def get_localized_text(key: str, language: str) -> str:
             'settings_title': '⚙️ Настройки',
             'settings_text': 'Выберите язык интерфейса.',
             'settings_saved': '✅ Язык интерфейса обновлён.',
-            'step3': '💰 <b>Шаг 3/4 — Укажите сумму сделки</b>\n\nВведите только число, без названия валюты.\n\n<b>Примеры:</b>\n• <code>500</code>\n• <code>1500</code>\n• <code>25.5</code>',
+            'step3': '💰 <b>Шаг 3/4 — Укажите сумму сделки</b>\n\nВведите только число, без названия валюты.',
             'step4': '📦 <b>Шаг 4/4 — Опишите товар</b>\n\nНапишите, что именно вы передаете покупателю.\n\nЛучше всего — скопируйте ссылку на подарок и используйте ее для описания товара.\n\n<b>Примеры:</b>\n• НФТ Плюшевый Пепе\n• t.me/nft/SnoopDogg-1\n• Редкий BLUR NFT #2847',
             'payment_confirmed_title': '✅ Оплата подтверждена!',
             'payment_confirmed_body': '👤 Покупатель уже оплатил сделку.\n\n📦 Передайте подарок покупателю и нажмите кнопку ниже, когда всё будет готово.',
@@ -220,31 +265,87 @@ def admin_user_label(user: User | None, fallback_id: int | None = None) -> str:
     return str(fallback_id if fallback_id is not None else (user.id if user else '-'))
 
 
-async def notify_admins(bot, text: str) -> None:
-    for admin_id in set(config.ADMIN_IDS) | set(config.SUPER_ADMIN_IDS):
+async def schedule_background_task(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+
+    def _log_task_result(task: asyncio.Task) -> None:
         try:
-            await bot.send_message(admin_id, text)
-        except Exception:
-            logger.warning('Не удалось уведомить администратора %s', admin_id)
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            logger.warning('Background task failed: %s', exc)
+
+    task.add_done_callback(_log_task_result)
+    await asyncio.sleep(0)
+    return task
+
+
+async def send_messages_concurrently(bot, chat_ids: list[int], text: str, **kwargs) -> int:
+    if not chat_ids:
+        return 0
+
+    async def _send(chat_id: int) -> bool:
+        try:
+            await bot.send_message(chat_id, text, **kwargs)
+            return True
+        except Exception as exc:
+            logger.warning('Не удалось отправить сообщение %s: %s', chat_id, exc)
+            return False
+
+    results = await asyncio.gather(*(_send(chat_id) for chat_id in chat_ids), return_exceptions=True)
+    return sum(1 for result in results if result is True)
+
+
+async def notify_admins(bot, text: str) -> None:
+    admin_ids = list(set(config.ADMIN_IDS) | set(config.SUPER_ADMIN_IDS))
+    if not admin_ids:
+        return
+
+    await send_messages_concurrently(bot, admin_ids, text)
+
+
+async def notify_deal_participants(
+    bot,
+    *,
+    seller_id: int | None = None,
+    buyer_id: int | None = None,
+    seller_text: str | None = None,
+    buyer_text: str | None = None,
+    seller_kwargs: dict | None = None,
+    buyer_kwargs: dict | None = None,
+) -> None:
+    tasks = []
+    if seller_id is not None and seller_text is not None:
+        tasks.append(bot.send_message(seller_id, seller_text, **(seller_kwargs or {})))
+    if buyer_id is not None and buyer_text is not None:
+        tasks.append(bot.send_message(buyer_id, buyer_text, **(buyer_kwargs or {})))
+    if not tasks:
+        return
+
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def check_and_notify_timeout(bot, session: AsyncSession, deal) -> None:
     """Check if deal timeout has expired and notify users"""
     from app.bot.utils import check_deal_timeout
-    
+
     if not check_deal_timeout(deal):
         return
-    
+
     if deal.status == DealStatus.REJECTED or deal.status == DealStatus.CANCELLED:
         return
-    
-    # Cancel the deal
+
     deal.status = DealStatus.CANCELLED
     await session.commit()
-    
-    # Notify seller
-    seller = await UserRepository(session).get(deal.seller_id)
-    if seller:
+
+    seller_task = UserRepository(session).get(deal.seller_id)
+    buyer_task = UserRepository(session).get(deal.buyer_id) if deal.buyer_id else None
+    seller, buyer = await asyncio.gather(seller_task, buyer_task) if buyer_task is not None else (await seller_task, None)
+
+    async def _notify_seller() -> None:
+        if not seller:
+            return
         try:
             await bot.send_message(
                 seller.id,
@@ -255,21 +356,22 @@ async def check_and_notify_timeout(bot, session: AsyncSession, deal) -> None:
             )
         except Exception as e:
             logger.warning('Не удалось уведомить продавца: %s', e)
-    
-    # Notify buyer
-    if deal.buyer_id:
-        buyer = await UserRepository(session).get(deal.buyer_id)
-        if buyer:
-            try:
-                await bot.send_message(
-                    buyer.id,
-                    f'⏰ <b>Сделка отменена</b>\n\n'
-                    f'Сделка №{deal.deal_number} отменена по причине: истекло время ожидания оплаты (15 минут).\n\n'
-                    f'Деньги не были списаны.',
-                    parse_mode='HTML'
-                )
-            except Exception as e:
-                logger.warning('Не удалось уведомить покупателя: %s', e)
+
+    async def _notify_buyer() -> None:
+        if not buyer:
+            return
+        try:
+            await bot.send_message(
+                buyer.id,
+                f'⏰ <b>Сделка отменена</b>\n\n'
+                f'Сделка №{deal.deal_number} отменена по причине: истекло время ожидания оплаты (15 минут).\n\n'
+                f'Деньги не были списаны.',
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.warning('Не удалось уведомить покупателя: %s', e)
+
+    await asyncio.gather(_notify_seller(), _notify_buyer(), return_exceptions=True)
 
 
 async def ensure_admin(message: Message, is_admin: bool) -> bool:
@@ -290,7 +392,9 @@ def message_equals(text: str, ignore_case: bool = False):
     def _filter(message: Message) -> bool:
         if not message.text:
             return False
-        return message.text.lower() == text.lower() if ignore_case else message.text == text
+        candidate = message.text.strip()
+        target = text.strip()
+        return candidate.lower() == target.lower() if ignore_case else candidate == target
     return _filter
 
 
@@ -308,12 +412,21 @@ def callback_data_equals(data: str):
 
 async def send_main_menu(message: Message, session: AsyncSession | None = None, db_user: User | None = None) -> None:
     language = await get_user_language(session, db_user.id) if session and db_user else 'ru'
-    await message.answer_photo(
-        photo=logo_file(),
-        caption=get_localized_text('main_caption', language),
-        reply_markup=main_menu(language),
-        parse_mode='HTML',
-    )
+    is_admin = bool(db_user and getattr(db_user, 'role', UserRole.USER) in {UserRole.ADMIN, UserRole.SUPER_ADMIN})
+    try:
+        await message.answer_photo(
+            photo=logo_file(),
+            caption=get_localized_text('main_caption', language),
+            reply_markup=main_menu(language, is_admin),
+            parse_mode='HTML',
+        )
+        return
+    except Exception:
+        await message.answer(
+            get_localized_text('main_caption', language),
+            reply_markup=main_menu(language, is_admin),
+            parse_mode='HTML',
+        )
 
 
 async def language_callback(callback: CallbackQuery, session: AsyncSession, db_user: User) -> None:
@@ -391,6 +504,13 @@ async def menu_callback(callback: CallbackQuery, state: FSMContext, session: Asy
         await state.set_state(DealCreation.choose_currency)
         await callback.answer()
         return
+    if action == 'menu_admin_panel':
+        if not (is_admin or is_super_admin or db_user.role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}):
+            await callback.answer('⛔ Недостаточно прав.', show_alert=True)
+            return
+        await callback.message.answer('🛠 Админ-панель', reply_markup=admin_panel_menu())
+        await callback.answer()
+        return
     if action.startswith('menu_currency_'):
         currency_key = action.split('_', 2)[2]
         try:
@@ -434,18 +554,7 @@ async def menu_callback(callback: CallbackQuery, state: FSMContext, session: Asy
         language = await get_user_language(session, db_user.id)
         await replace_message_with_photo(
             build_profile_caption(db_user, balances, language),
-            profile_menu(language),
-            (
-                f'<b>Профиль</b>\n'
-                f'ID: {db_user.id}\n'
-                f'Username: @{db_user.username or "не указан"}\n'
-                f'Завершенных сделок: {db_user.completed_deals or 0}\n\n'
-                f'<b>Баланс</b>\n{format_balance(balances) or "Баланс отсутствует."}\n\n'
-                f'Привязанная карта: {db_user.card_data or "не задана"}\n'
-                f'TON кошелек: {db_user.ton_wallet or "не задан"}\n'
-                f'Получатель Stars: {db_user.stars_recipient or "не задан"}'
-            ),
-            profile_menu(),
+            profile_menu(language, bool(is_admin or is_super_admin or db_user.role in {UserRole.ADMIN, UserRole.SUPER_ADMIN})),
             parse_mode='HTML',
         )
         await callback.answer()
@@ -574,21 +683,9 @@ async def send_profile(message: Message, session: AsyncSession, db_user: User) -
     await message.answer_photo(
         photo=logo_file(),
         caption=build_profile_caption(db_user, balances, language),
-        reply_markup=profile_menu(language),
-        caption=(
-            f'<b>Профиль</b>\n'
-            f'ID: {db_user.id}\n'
-            f'Username: @{db_user.username or "не указан"}\n'
-            f'Завершенных сделок: {db_user.completed_deals or 0}\n\n'
-            f'<b>Баланс</b>\n{format_balance(balances)}\n\n'
-            f'Привязанная карта: {db_user.card_data or "не задана"}\n'
-            f'TON кошелек: {db_user.ton_wallet or "не задан"}\n'
-            f'Получатель Stars: {db_user.stars_recipient or "не задан"}'
-        ),
-        reply_markup=profile_menu(),
+        reply_markup=profile_menu(language, bool(db_user.role in {UserRole.ADMIN, UserRole.SUPER_ADMIN})),
         parse_mode='HTML',
     )
-
 
 async def show_help_create(message: Message) -> None:
     await message.answer(
@@ -639,7 +736,6 @@ async def handle_start(message: Message, session: AsyncSession, db_user: User, p
         if not deal.buyer_id:
             await deal_repo.assign_buyer(deal, db_user.id)
             await session.commit()
-            # Notify seller that buyer joined
             seller = await UserRepository(session).get(deal.seller_id)
             if seller:
                 await message.bot.send_photo(
@@ -676,7 +772,7 @@ async def handle_start(message: Message, session: AsyncSession, db_user: User, p
             reply_markup=buyer_payment_menu(deal.deal_number),
         )
         return
-    await send_main_menu(message)
+    await send_main_menu(message, session, db_user)
 
 
 async def start_deal(message: Message, state: FSMContext) -> None:
@@ -699,7 +795,15 @@ async def process_deal_currency(message: Message, state: FSMContext, session: As
         return
     await state.update_data(currency=currency.value)
     language = await get_user_language(session, db_user.id)
-    await message.answer(get_localized_text('step3', language), parse_mode='HTML')
+    minimum_text = get_minimum_amount_text(currency)
+    await message.answer(
+        (
+            '💰 <b>Шаг 3/4 — Укажите сумму сделки</b>\n\n'
+            f'Минимально допустимая сумма для {currency.value}: <b>{minimum_text}</b>\n\n'
+            'Введите только число, без названия валюты.'
+        ),
+        parse_mode='HTML',
+    )
     await state.set_state(DealCreation.enter_amount)
 
 
@@ -711,6 +815,17 @@ async def process_deal_amount(message: Message, state: FSMContext, session: Asyn
     except ValueError:
         await message.answer('Введите корректную сумму, например: 500 или 25.5')
         return
+
+    data = await state.get_data()
+    currency = Currency(data.get('currency', Currency.RUB.value))
+    minimum_amount = get_minimum_amount_for_currency(currency)
+    if amount < minimum_amount:
+        await message.answer(
+            f'⚠️ Минимальная сумма сделки — {get_minimum_amount_text(currency)}. Ниже этого значения сделку нельзя создать.',
+            reply_markup=deal_currency_menu(),
+        )
+        return
+
     await state.update_data(amount=amount)
     language = await get_user_language(session, db_user.id)
     await message.answer(get_localized_text('step4', language), parse_mode='HTML')
@@ -728,15 +843,22 @@ async def process_deal_description(message: Message, state: FSMContext, session:
     deal_repo = DealRepository(session)
     deal = await deal_repo.create(db_user.id, currency, amount, description, build_payment_comment())
     await session.commit()
+
+    invite_link = f'https://t.me/{config.BOT_USERNAME}?start={deal.deal_code}'
+    share_text = 'Перейди по ссылке, чтобы начать безопасную сделку в NIFTIX'
+    share_url = f'https://t.me/share/url?url={quote(invite_link)}&text={quote(share_text)}'
     await message.answer(
         (
             f'✅ Сделка успешно создана\n'
             f'{get_deal_title(deal)}\n'
             f'🎁 Тип: {deal.deal_type}\n'
             f'📦 Товар: {deal.item_description}\n'
-            f'💰 Получаете: {deal.amount:.2f} {deal.currency.value}\n'
-            f'🔗 Ссылка для покупателя:\nhttps://t.me/{config.BOT_USERNAME}?start={deal.deal_code}'
-        )
+            f'💰 Получаете: {deal.amount:.2f} {deal.currency.value}\n\n'
+            f'🔗 {share_text}:\n{invite_link}'
+        ),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text='📤 Поделиться сделкой', url=share_url)],
+        ]),
     )
     await state.clear()
 
@@ -978,10 +1100,10 @@ async def buyer_paid(callback: CallbackQuery, session: AsyncSession, db_user: Us
     deal.status = DealStatus.PAYMENT_VERIFICATION
     await session.commit()
     await callback.answer('✅ Оплата отмечена. Ожидается проверка.', show_alert=True)
-    await notify_admins(
+    await schedule_background_task(notify_admins(
         callback.bot,
         f'Новая заявка на проверку оплаты\nСделка №{deal.deal_number}\nПокупатель: @{db_user.username or db_user.id}\nСумма: {deal.amount:.2f} {deal.currency.value}\nКомментарий: {deal.payment_comment}',
-    )
+    ))
 
 
 async def seller_transferred(callback: CallbackQuery, session: AsyncSession, db_user: User) -> None:
@@ -999,11 +1121,12 @@ async def seller_transferred(callback: CallbackQuery, session: AsyncSession, db_
     buyer = await UserRepository(session).get(deal.buyer_id)
     await callback.answer(get_localized_text('seller_transfer_done', seller_lang), show_alert=True)
     if buyer:
-        await callback.bot.send_message(
-            buyer.id,
-            get_localized_text('buyer_transfer_notice', await get_user_language(session, buyer.id)),
-            reply_markup=buyer_confirm_menu(deal.deal_number),
-        )
+        await schedule_background_task(notify_deal_participants(
+            callback.bot,
+            buyer_id=buyer.id,
+            buyer_text=get_localized_text('buyer_transfer_notice', await get_user_language(session, buyer.id)),
+            buyer_kwargs={'reply_markup': buyer_confirm_menu(deal.deal_number)},
+        ))
 
 
 async def buyer_confirmed(callback: CallbackQuery, session: AsyncSession, db_user: User) -> None:
@@ -1025,9 +1148,9 @@ async def buyer_confirmed(callback: CallbackQuery, session: AsyncSession, db_use
     await callback.answer('✅ Сделка завершена.', show_alert=True)
     if seller:
         seller_lang = await get_user_language(session, seller.id)
-        await callback.bot.send_message(seller.id, get_localized_text('deal_completed_seller', seller_lang))
+        await schedule_background_task(callback.bot.send_message(seller.id, get_localized_text('deal_completed_seller', seller_lang)))
     buyer_lang = await get_user_language(session, db_user.id)
-    await callback.bot.send_message(db_user.id, get_localized_text('deal_completed_buyer', buyer_lang))
+    await schedule_background_task(callback.bot.send_message(db_user.id, get_localized_text('deal_completed_buyer', buyer_lang)))
 
 
 async def confirm_payment(callback: CallbackQuery, session: AsyncSession, db_user: User, is_admin: bool, is_super_admin: bool) -> None:
@@ -1070,7 +1193,7 @@ async def confirm_payment(callback: CallbackQuery, session: AsyncSession, db_use
     await callback.answer('Оплата подтверждена.', show_alert=True)
     if seller:
         seller_lang = await get_user_language(session, seller.id)
-        await callback.bot.send_photo(
+        await schedule_background_task(callback.bot.send_photo(
             seller.id,
             photo=logo_file(),
             caption=(
@@ -1081,7 +1204,7 @@ async def confirm_payment(callback: CallbackQuery, session: AsyncSession, db_use
             ),
             reply_markup=seller_transfer_menu(deal.deal_number),
             parse_mode='HTML'
-        )
+        ))
 
 
 async def reject_payment(callback: CallbackQuery, session: AsyncSession, db_user: User, is_admin: bool, is_super_admin: bool) -> None:
@@ -1102,7 +1225,7 @@ async def reject_payment(callback: CallbackQuery, session: AsyncSession, db_user
     await callback.answer('Оплата отклонена.')
     buyer = await UserRepository(session).get(payment.buyer_id)
     if buyer:
-        await callback.bot.send_message(buyer.id, '⛔ Оплата отклонена администрацией. Проверьте реквизиты и попробуйте снова.')
+        await schedule_background_task(callback.bot.send_message(buyer.id, '⛔ Оплата отклонена администрацией. Проверьте реквизиты и попробуйте снова.'))
 
 
 async def withdraw_ok(callback: CallbackQuery, session: AsyncSession, db_user: User, is_admin: bool, is_super_admin: bool) -> None:
@@ -1122,7 +1245,7 @@ async def withdraw_ok(callback: CallbackQuery, session: AsyncSession, db_user: U
     await callback.answer('Заявка выполнена.')
     user = await UserRepository(session).get(request.user_id)
     if user:
-        await callback.bot.send_message(user.id, '✅ Заявка на вывод выполнена.')
+        await schedule_background_task(callback.bot.send_message(user.id, '✅ Заявка на вывод выполнена.'))
 
 
 async def withdraw_reject(callback: CallbackQuery, session: AsyncSession, db_user: User, is_admin: bool, is_super_admin: bool) -> None:
@@ -1141,7 +1264,7 @@ async def withdraw_reject(callback: CallbackQuery, session: AsyncSession, db_use
     await callback.answer('Заявка отклонена.')
     user = await UserRepository(session).get(request.user_id)
     if user:
-        await callback.bot.send_message(user.id, '⛔ Ваша заявка на вывод отклонена.')
+        await schedule_background_task(callback.bot.send_message(user.id, '⛔ Ваша заявка на вывод отклонена.'))
 
 
 async def confirm_withdraw(callback: CallbackQuery, state: FSMContext, session: AsyncSession, db_user: User) -> None:
@@ -1167,6 +1290,10 @@ async def confirm_withdraw(callback: CallbackQuery, state: FSMContext, session: 
     await session.commit()
     
     await callback.answer('✅ Заявка принята!', show_alert=True)
+    await schedule_background_task(notify_admins(
+        callback.bot,
+        f'Заявка на вывод\nПользователь: @{db_user.username or db_user.id}\nВалюта: {currency.value}\nСумма: {amount:.2f}',
+    ))
     await callback.message.edit_text(
         '✅ Ваша заявка на вывод принята!\n\n'
         '💬 Обработка: 24-48 часов (в редких случаях до 72 часов)\n'
@@ -1177,11 +1304,6 @@ async def confirm_withdraw(callback: CallbackQuery, state: FSMContext, session: 
     
     await state.clear()
     
-    # Notify admins
-    await notify_admins(
-        callback.bot,
-        f'Заявка на вывод\nПользователь: @{db_user.username or db_user.id}\nВалюта: {currency.value}\nСумма: {amount:.2f}',
-    )
 
 
 async def cancel_withdraw(callback: CallbackQuery, state: FSMContext) -> None:
@@ -1334,20 +1456,25 @@ async def stats(message: Message, is_admin: bool, session: AsyncSession) -> None
     active_users = await session.scalar(select(func.count()).select_from(User).where(User.blocked == False))
     total_deals = await session.scalar(select(func.count()).select_from(Deal))
     completed_deals = await session.scalar(select(func.count()).select_from(Deal).where(Deal.status == DealStatus.COMPLETED))
-    currency_totals = []
-    for currency in Currency:
-        amount = (await session.scalar(select(func.sum(Deal.amount)).where(Deal.currency == currency))) or 0.0
-        currency_totals.append(f'{currency.value}: {amount:.2f}')
     withdraw_count = await session.scalar(select(func.count()).select_from(WithdrawRequest))
+    rows = await session.execute(select(User.id, User.registered_at, User.completed_deals, User.total_volume).limit(10))
+    recent_users = rows.all()
     await message.answer(
         (
-            f'Всего пользователей: {total_users}\n'
-            f'Активных пользователей: {active_users}\n'
-            f'Всего сделок: {total_deals}\n'
-            f'Завершенных сделок: {completed_deals}\n'
-            f'Количество выводов: {withdraw_count}\n'
-            f'Суммы по валютам:\n' + '\n'.join(currency_totals)
-        )
+            '📊 <b>Статистика</b>\n'
+            '━━━━━━━━━━━━━━━━━━━━━━\n'
+            f'👥 Пользователей: <b>{total_users or 0}</b>\n'
+            f'🟢 Активных: <b>{active_users or 0}</b>\n'
+            f'🧾 Сделок: <b>{total_deals or 0}</b>\n'
+            f'✅ Завершено: <b>{completed_deals or 0}</b>\n'
+            f'💸 Выводов: <b>{withdraw_count or 0}</b>\n\n'
+            '<b>🔝 Новые пользователи</b>\n' +
+            '\n'.join(f'{user_id} • {registered_at.strftime("%d.%m.%Y")}' for user_id, registered_at, *_ in recent_users) +
+            '\n\n' +
+            '⏱️ Выберите период в кнопках ниже.'
+        ),
+        reply_markup=stats_period_menu(),
+        parse_mode='HTML',
     )
 
 
@@ -1449,6 +1576,81 @@ async def remove_admin(message: Message, is_super_admin: bool, session: AsyncSes
     await message.answer(f'Пользователь {parts[1]} удален из администраторов.')
 
 
+async def add_balance_to_user(message: Message, is_admin: bool, is_super_admin: bool, session: AsyncSession, db_user: User) -> None:
+    if not (is_admin or is_super_admin or db_user.role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}):
+        await message.answer('⛔ Недостаточно прав.')
+        return
+
+    parts = (message.text or '').split()
+    if not parts:
+        await message.answer('Используйте: /addbalance USER_ID CURRENCY AMOUNT или /selfbalance CURRENCY AMOUNT')
+        return
+
+    target_id = db_user.id
+    currency_token = None
+    amount_token = None
+
+    if parts[0].lower() in {'/addbalance', '/selfbalance'}:
+        if parts[0].lower() == '/selfbalance':
+            if len(parts) < 3:
+                await message.answer('Используйте: /selfbalance CURRENCY AMOUNT')
+                return
+            currency_token = parts[1]
+            amount_token = parts[2]
+        else:
+            if len(parts) < 4:
+                await message.answer('Используйте: /addbalance USER_ID CURRENCY AMOUNT')
+                return
+            if not parts[1].isdigit():
+                await message.answer('USER_ID должен быть числом.')
+                return
+            target_id = int(parts[1])
+            currency_token = parts[2]
+            amount_token = parts[3]
+    else:
+        if len(parts) < 3:
+            await message.answer('Используйте: /addbalance USER_ID CURRENCY AMOUNT или /selfbalance CURRENCY AMOUNT')
+            return
+        if parts[0].isdigit():
+            target_id = int(parts[0])
+            currency_token = parts[1]
+            amount_token = parts[2]
+        else:
+            currency_token = parts[0]
+            amount_token = parts[1]
+
+    try:
+        currency = Currency[currency_token.upper()]
+    except KeyError:
+        alias = currency_token.upper()
+        if alias == 'STARS':
+            currency = Currency.STARS
+        else:
+            await message.answer('Неподдерживаемая валюта. Примеры: RUB, EUR, TON, STARS.')
+            return
+
+    try:
+        amount = float(amount_token.replace(',', '.'))
+    except ValueError:
+        await message.answer('Сумма должна быть числом.')
+        return
+
+    if amount <= 0:
+        await message.answer('Сумма должна быть больше нуля.')
+        return
+
+    user = await UserRepository(session).get(target_id)
+    if user is None:
+        user = await UserRepository(session).create_or_update(target_id, None, None)
+
+    await BalanceRepository(session).change(target_id, currency, amount)
+    await session.commit()
+    await message.answer(
+        f'✅ Баланс обновлён: пользователь {target_id} получил +{amount:.2f} {currency.value}.',
+        reply_markup=main_menu(),
+    )
+
+
 async def export_db_file(session: AsyncSession) -> Path:
     import json
     from tempfile import gettempdir
@@ -1461,8 +1663,12 @@ async def export_db_file(session: AsyncSession) -> Path:
             cleaned_rows.append({key: value for key, value in row.__dict__.items() if not key.startswith('_')})
         data[model.__tablename__] = cleaned_rows
     filename = Path(gettempdir()) / f'db_export_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}.json'
-    with open(filename, 'w', encoding='utf-8') as f:
-        json.dump(data, f, default=str, ensure_ascii=False, indent=2)
+
+    def _write_json(path: Path, payload: dict) -> None:
+        with open(path, 'w', encoding='utf-8') as handle:
+            json.dump(payload, handle, default=str, ensure_ascii=False, indent=2)
+
+    await asyncio.to_thread(_write_json, filename, data)
     return filename
 
 
@@ -1502,20 +1708,157 @@ async def broadcast_confirm(message: Message, state: FSMContext, session: AsyncS
         await message.answer('⛔ Недостаточно прав.')
         await state.clear()
         return
+
+    confirmation = (message.text or '').strip().lower()
+    if confirmation not in {'да', 'yes', 'y', 'confirm'}:
+        await message.answer('Для подтверждения напишите «Да» или «Yes».')
+        return
+
     data = await state.get_data()
     text = data.get('broadcast_text')
     if not text:
         await message.answer('Нет текста для рассылки.')
         await state.clear()
         return
-    rows = await session.execute(select(User.id))
-    recipients = [row[0] for row in rows.all()]
-    for uid in recipients:
-        try:
-            await message.bot.send_message(uid, text)
-        except Exception:
+
+    rows = await session.execute(select(User))
+    users = rows.scalars().all()
+    recipients = []
+    for user in users:
+        blocked_value = getattr(user, 'blocked', False)
+        if isinstance(blocked_value, str):
+            blocked_value = blocked_value.strip().lower() in {'1', 'true', 'yes', 'y'}
+        if blocked_value:
             continue
-    await message.answer(f'✅ Рассылка отправлена {len(recipients)} пользователям.')
+        recipients.append(int(user.id))
+    recipients = sorted(set(recipients))
+    sent = await send_messages_concurrently(message.bot, recipients, text)
+    await message.answer(f'✅ Рассылка отправлена {sent} пользователям.')
+    await state.clear()
+
+
+async def direct_user_broadcast(message: Message, state: FSMContext, session: AsyncSession, db_user: User) -> None:
+    if db_user.role not in {UserRole.ADMIN, UserRole.SUPER_ADMIN} and db_user.id not in {*config.ADMIN_IDS, *config.SUPER_ADMIN_IDS}:
+        await message.answer('⛔ Недостаточно прав.')
+        await state.clear()
+        return
+    data = await state.get_data()
+    target_user_id = data.get('target_user_id')
+    if not target_user_id:
+        await message.answer('Тема сообщения не найдена. Повторите попытку.')
+        await state.clear()
+        return
+    text = message.text or ''
+    try:
+        await message.bot.send_message(target_user_id, f'📣 <b>Сообщение от администрации</b>\n\n{text}', parse_mode='HTML')
+    except Exception:
+        await message.answer('Не удалось отправить сообщение этому пользователю.')
+        await state.clear()
+        return
+    await message.answer(f'✅ Сообщение отправлено пользователю #{target_user_id}.')
+    await state.clear()
+
+
+async def is_user_online(session: AsyncSession, user_id: int, window_seconds: int = 180) -> bool:
+    seen_value = await SettingsRepository(session).get(f'user_seen:{user_id}')
+    if not seen_value:
+        return False
+    try:
+        seen_at = datetime.fromisoformat(seen_value)
+    except ValueError:
+        return False
+    return (datetime.utcnow() - seen_at).total_seconds() <= window_seconds
+
+
+async def import_db_payload(session: AsyncSession, payload: dict) -> tuple[int, int]:
+    imported_users = 0
+    imported_balances = 0
+    for key, rows in (payload or {}).items():
+        if key == 'users':
+            for row in rows:
+                user_id = int(row.get('id'))
+                existing = await UserRepository(session).get(user_id)
+                if existing is None:
+                    existing = User(id=user_id)
+                    session.add(existing)
+                existing.username = row.get('username')
+                existing.full_name = row.get('full_name')
+                existing.card_data = row.get('card_data')
+                existing.ton_wallet = row.get('ton_wallet')
+                existing.stars_recipient = row.get('stars_recipient')
+                existing.completed_deals = int(row.get('completed_deals') or 0)
+                existing.total_volume = float(row.get('total_volume') or 0.0)
+                existing.blocked = bool(row.get('blocked'))
+                role_value = row.get('role')
+                if role_value == 'super_admin':
+                    existing.role = UserRole.SUPER_ADMIN
+                elif role_value == 'admin':
+                    existing.role = UserRole.ADMIN
+                else:
+                    existing.role = UserRole.USER
+                imported_users += 1
+        elif key == 'balances':
+            for row in rows:
+                user_id = int(row.get('user_id'))
+                currency = Currency(row.get('currency'))
+                balance = await BalanceRepository(session).get_balance(user_id, currency)
+                if balance is None:
+                    balance = Balance(user_id=user_id, currency=currency, amount=0.0)
+                    session.add(balance)
+                balance.amount = float(row.get('amount') or 0.0)
+                imported_balances += 1
+    await session.commit()
+    return imported_users, imported_balances
+
+
+async def import_db_from_message(message: Message, state: FSMContext, session: AsyncSession, db_user: User) -> None:
+    if db_user.role not in {UserRole.ADMIN, UserRole.SUPER_ADMIN} and db_user.id not in {*config.ADMIN_IDS, *config.SUPER_ADMIN_IDS}:
+        await message.answer('⛔ Недостаточно прав.')
+        await state.clear()
+        return
+    if not message.document:
+        await message.answer('📥 Пришлите файл JSON с экспортом базы данных.')
+        return
+
+    try:
+        file = await message.bot.get_file(message.document.file_id)
+        raw = await message.bot.download_file(file.file_path)
+        decoded = await asyncio.to_thread(lambda value: value.decode('utf-8'), raw)
+        payload = await asyncio.to_thread(__import__('json').loads, decoded)
+    except Exception:
+        await message.answer('❌ Файл должен быть корректным JSON-экспортом базы данных.')
+        await state.clear()
+        return
+
+    normalized = payload if isinstance(payload, dict) else {}
+    if not isinstance(normalized, dict):
+        await message.answer('❌ Файл не является корректным экспортом базы данных. Используйте экспорт из этого бота.')
+        await state.clear()
+        return
+
+    valid_export = False
+    for key in ('users', 'balances', 'deals', 'payments', 'withdraw_requests'):
+        if key in normalized and isinstance(normalized.get(key), list):
+            valid_export = True
+            break
+    if not valid_export:
+        for nested in (normalized.get('data'), normalized.get('export'), normalized.get('records')):
+            if isinstance(nested, dict):
+                for key in ('users', 'balances', 'deals', 'payments', 'withdraw_requests'):
+                    if key in nested and isinstance(nested.get(key), list):
+                        normalized[key] = nested[key]
+                        valid_export = True
+                        break
+            if valid_export:
+                break
+
+    if not valid_export:
+        await message.answer('❌ Файл не является корректным экспортом базы данных. Используйте экспорт из этого бота.')
+        await state.clear()
+        return
+
+    imported_users, imported_balances = await import_db_payload(session, normalized)
+    await message.answer(f'✅ Импорт базы данных выполнен успешно: пользователей {imported_users}, балансов {imported_balances}.')
     await state.clear()
 
 
@@ -1526,35 +1869,148 @@ async def admin_callback(callback: CallbackQuery, state: FSMContext, session: As
         return
     data = callback.data or ''
 
-    if data == 'admin_stats':
+    if data.startswith('admin_stats:'):
+        period = data.split(':', 1)[1]
+        cutoff = None
+        if period == '7d':
+            cutoff = datetime.utcnow() - timedelta(days=7)
+        elif period == '30d':
+            cutoff = datetime.utcnow() - timedelta(days=30)
+        elif period == '90d':
+            cutoff = datetime.utcnow() - timedelta(days=90)
+
         total_users = await session.scalar(select(func.count()).select_from(User))
         active_users = await session.scalar(select(func.count()).select_from(User).where(User.blocked == False))
         total_deals = await session.scalar(select(func.count()).select_from(Deal))
         completed_deals = await session.scalar(select(func.count()).select_from(Deal).where(Deal.status == DealStatus.COMPLETED))
         withdraw_count = await session.scalar(select(func.count()).select_from(WithdrawRequest))
+        if cutoff is not None:
+            new_users = await session.scalar(select(func.count()).select_from(User).where(User.registered_at >= cutoff))
+            new_deals = await session.scalar(select(func.count()).select_from(Deal).where(Deal.created_at >= cutoff))
+            new_payments = await session.scalar(select(func.count()).select_from(Payment).where(Payment.created_at >= cutoff))
+        else:
+            new_users = total_users
+            new_deals = total_deals
+            new_payments = await session.scalar(select(func.count()).select_from(Payment))
+
         await callback.message.answer(
-            f'📊 <b>Статистика</b>\n\n'
-            f'Всего пользователей: {total_users or 0}\n'
-            f'Активных пользователей: {active_users or 0}\n'
-            f'Всего сделок: {total_deals or 0}\n'
-            f'Завершенных сделок: {completed_deals or 0}\n'
-            f'Количество выводов: {withdraw_count or 0}',
+            '📊 <b>Статистика</b>\n'
+            '━━━━━━━━━━━━━━━━━━━━━━\n'
+            f'👥 Пользователей: <b>{total_users or 0}</b>\n'
+            f'🟢 Активных: <b>{active_users or 0}</b>\n'
+            f'🧾 Сделок: <b>{total_deals or 0}</b>\n'
+            f'✅ Завершено: <b>{completed_deals or 0}</b>\n'
+            f'💸 Выводов: <b>{withdraw_count or 0}</b>\n'
+            f'🔥 Новые за период: <b>{new_users or 0}</b>\n'
+            f'🆕 Сделки за период: <b>{new_deals or 0}</b>\n'
+            f'💳 Платежей за период: <b>{new_payments or 0}</b>',
             parse_mode='HTML',
+            reply_markup=stats_period_menu(),
         )
         await callback.answer()
         return
     if data == 'admin_users':
-        result = await session.execute(select(User).limit(30))
-        users = result.scalars().all()
+        users = list(await UserRepository(session).search('', limit=30))
         if not users:
-            await callback.message.answer('Пользователей нет.')
+            await callback.message.answer('👥 Пользователей нет.\nПроверьте, что бот видит аккаунты в текущей сессии и БД.')
         else:
-            await callback.message.answer('\n'.join(
-                f'{user.id} | @{user.username or "-"} | {user.completed_deals or 0} сделок | {"🚫" if user.blocked else "✅"}'
-                for user in users
-            ))
+            lines = []
+            for user in users:
+                badge = '🟢' if await is_user_online(session, user.id) else '🔴'
+                status = 'заблок.' if getattr(user, 'blocked', False) else 'онлайн' if badge == '🟢' else 'офлайн'
+                action_text = f'{badge} {user.id} | @{user.username or "-"} | {user.completed_deals or 0} сделок | {status}'
+                lines.append(action_text)
+            await callback.message.answer('👥 <b>Пользователи</b>\n' + '\n'.join(lines), parse_mode='HTML', reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🛠️ Управление пользователями', callback_data='admin_users_manage')]]))
         await callback.answer()
         return
+    if data == 'admin_users_manage':
+        users = list(await UserRepository(session).search('', limit=30))
+        if not users:
+            await callback.message.answer('Пользователей нет.')
+            await callback.answer()
+            return
+        keyboard_rows = []
+        for user in users:
+            keyboard_rows.append([InlineKeyboardButton(text=f'{"🔴" if user.blocked else "🟢"} {user.username or user.id}', callback_data=f'user_profile_action:{user.id}')])
+        await callback.message.answer('👥 Выберите пользователя для действий:', reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows))
+        await callback.answer()
+        return
+    if data.startswith('user_profile_action:'):
+        target_id = int(data.split(':', 1)[1])
+        user = await UserRepository(session).get(target_id)
+        if not user:
+            await callback.answer('Пользователь не найден.', show_alert=True)
+            return
+        await callback.message.answer(
+            f'👤 Пользователь #{user.id}\n@{user.username or "-"}\nСтатус: {"заблокирован" if user.blocked else "активен"}',
+            reply_markup=user_action_menu(user.id, bool(user.blocked)),
+        )
+        await callback.answer()
+        return
+    if data.startswith('user_action:'):
+        parts = data.split(':')
+        if len(parts) < 3:
+            await callback.answer('Некорректная команда.', show_alert=True)
+            return
+        action = parts[1]
+        target_id = int(parts[2])
+        target_user = await UserRepository(session).get(target_id)
+        if target_user is None:
+            await callback.answer('Пользователь не найден.', show_alert=True)
+            return
+
+        if action == 'block':
+            await UserRepository(session).block(target_id, True)
+            await session.commit()
+            await callback.message.answer(f'🔒 Пользователь {target_id} заблокирован.')
+            await callback.answer('Пользователь заблокирован.')
+            return
+        if action == 'unblock':
+            await UserRepository(session).block(target_id, False)
+            await session.commit()
+            await callback.message.answer(f'🔓 Пользователь {target_id} разблокирован.')
+            await callback.answer('Пользователь разблокирован.')
+            return
+        if action == 'activity':
+            seen = await SettingsRepository(session).get(f'user_seen:{target_id}')
+            if not seen:
+                last_seen = 'никогда'
+            else:
+                try:
+                    last_seen = datetime.fromisoformat(seen).strftime('%d.%m.%Y %H:%M')
+                except ValueError:
+                    last_seen = seen
+            stats_text = (
+                f'📈 Активность пользователя #{target_id}\n'
+                f'@{target_user.username or "-"}\n'
+                f'Последняя активность: {last_seen}\n'
+                f'Сделок завершено: {target_user.completed_deals or 0}\n'
+                f'Общий объём: {(target_user.total_volume or 0.0):.2f}'
+            )
+            await callback.message.answer(stats_text)
+            await callback.answer()
+            return
+        if action == 'broadcast':
+            await state.update_data(target_user_id=target_id)
+            await callback.message.answer('📣 Напишите сообщение, которое будет отправлено этому пользователю.')
+            await state.set_state(AdminUserBroadcastStates.wait_message)
+            await callback.answer()
+            return
+        if action == 'add_money':
+            if len(parts) < 5:
+                await callback.answer('Неверные параметры.', show_alert=True)
+                return
+            currency_name = parts[3]
+            amount_value = float(parts[4])
+            try:
+                currency = Currency[currency_name.upper()]
+            except KeyError:
+                currency = Currency.STARS if currency_name.upper() == 'STARS' else Currency.RUB
+            await BalanceRepository(session).change(target_id, currency, amount_value)
+            await session.commit()
+            await callback.message.answer(f'✅ Пользователю {target_id} начислено {amount_value:.2f} {currency.value}.')
+            await callback.answer('Средства начислены.')
+            return
     if data == 'admin_balances':
         result = await session.execute(select(Balance).limit(50))
         balances = result.scalars().all()
@@ -1569,7 +2025,7 @@ async def admin_callback(callback: CallbackQuery, state: FSMContext, session: As
         await callback.answer()
         return
     if data == 'admin_blocked':
-        result = await session.execute(select(User).where(User.blocked == True).limit(50))
+        result = await session.execute(select(User).where(User.blocked.is_(True)).limit(50))
         users = result.scalars().all()
         if not users:
             await callback.message.answer('Заблокированных пользователей нет.')
@@ -1628,6 +2084,14 @@ async def admin_callback(callback: CallbackQuery, state: FSMContext, session: As
             return
         filename = await export_db_file(session)
         await callback.message.answer_document(FSInputFile(str(filename)), caption='📦 Выгрузка базы данных')
+        await callback.answer()
+        return
+    if data == 'admin_import_db':
+        if not (is_super_admin or db_user.role == UserRole.SUPER_ADMIN or db_user.id in config.SUPER_ADMIN_IDS):
+            await callback.answer('⛔ Только суперадминистратор может импортировать DB.', show_alert=True)
+            return
+        await callback.message.answer('📥 Отправьте JSON-файл экспорта базы данных.')
+        await state.set_state(ImportDBStates.wait_file)
         await callback.answer()
         return
     if data == 'admin_broadcast':
@@ -1742,7 +2206,11 @@ async def register_handlers(dp: Dispatcher) -> None:
     dp.message.register(finish_deal, Command('finishdeal'))
     dp.message.register(add_admin, Command('addadmin'))
     dp.message.register(remove_admin, Command('removeadmin'))
+    dp.message.register(add_balance_to_user, Command('addbalance'))
+    dp.message.register(add_balance_to_user, Command('selfbalance'))
     dp.message.register(export_db, Command('exportdb'))
+    dp.message.register(import_db_from_message, ImportDBStates.wait_file)
+    dp.message.register(import_db_from_message, Command('importdb'))
     dp.message.register(whoami, Command('whoami'))
     dp.message.register(process_deal_type, DealCreation.choose_type)
     dp.message.register(cancel_fsm, StateFilter('*'), message_equals('❌ Отмена'))
@@ -1770,6 +2238,7 @@ async def register_handlers(dp: Dispatcher) -> None:
     dp.message.register(broadcast_text, Command('broadcast'))
     dp.message.register(broadcast_text, BroadcastStates.enter_text)
     dp.message.register(broadcast_confirm, BroadcastStates.confirm, message_equals('Да', ignore_case=True))
+    dp.message.register(direct_user_broadcast, AdminUserBroadcastStates.wait_message)
     dp.message.register(send_main_menu, message_equals('⬅️ Назад'))
     dp.callback_query.register(language_callback, callback_data_startswith('set_lang_'))
     dp.callback_query.register(menu_callback, callback_data_startswith('menu_'))
@@ -1782,3 +2251,5 @@ async def register_handlers(dp: Dispatcher) -> None:
     dp.callback_query.register(withdraw_reject, callback_data_startswith('withdraw_reject:'))
     dp.callback_query.register(support_reply_start, callback_data_startswith('support_reply:'))
     dp.callback_query.register(admin_callback, callback_data_startswith('admin_'))
+    dp.callback_query.register(admin_callback, callback_data_startswith('user_profile_action:'))
+    dp.callback_query.register(admin_callback, callback_data_startswith('user_action:'))

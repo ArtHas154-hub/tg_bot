@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.db.session import InMemorySession, IN_MEMORY_STORE
 from app.db.models import User, Deal, Payment, Currency, PaymentStatus, DealStatus
 from app.db.repository import DealRepository, PaymentRepository, UserRepository, BalanceRepository
-from app.bot.handlers import confirm_payment, admin_callback
+from app.bot.handlers import confirm_payment, admin_callback, menu_callback, add_balance_to_user
 
 
 class FakeBot:
@@ -26,13 +26,17 @@ class FakeChat:
 
 
 class FakeMessage:
-    def __init__(self, chat_id):
+    def __init__(self, chat_id, text=''):
         self.chat = FakeChat(chat_id)
+        self.text = text
         self._answers = []
 
     async def answer(self, text, **kwargs):
         # emulate message.answer by calling bot (not available here); just record
         self._answers.append((text, kwargs))
+
+    async def answer_document(self, file, **kwargs):
+        self._answers.append(('document', {'file': file, **kwargs}))
 
 
 class FakeCallback:
@@ -44,6 +48,91 @@ class FakeCallback:
 
     async def answer(self, *args, **kwargs):
         self.answered = True
+
+
+class FakeState:
+    async def get_data(self):
+        return {}
+
+    async def update_data(self, **kwargs):
+        return None
+
+    async def set_state(self, *args, **kwargs):
+        return None
+
+    async def clear(self):
+        return None
+
+
+class FakeProfileMessage:
+    def __init__(self, chat_id):
+        self.chat = FakeChat(chat_id)
+        self.edited = None
+
+    async def edit_caption(self, caption=None, reply_markup=None, parse_mode=None):
+        self.edited = {
+            'caption': caption,
+            'reply_markup': reply_markup,
+            'parse_mode': parse_mode,
+        }
+
+
+def test_profile_callback_opens_profile_menu():
+    async def scenario():
+        bot = FakeBot()
+        session = InMemorySession()
+        user = User(id=42, username='tester')
+        session.add(user)
+
+        message = FakeProfileMessage(chat_id=42)
+        callback = FakeCallback(data='menu_profile', bot=bot, message=message)
+
+        await menu_callback(callback, FakeState(), session, user, False, False)
+
+        assert message.edited is not None
+        assert 'Профиль' in message.edited['caption']
+        assert callback.answered is True
+
+    asyncio.run(scenario())
+
+
+def test_admin_callbacks_work_on_in_memory_session():
+    async def scenario():
+        session = InMemorySession()
+        admin = User(id=999, username='admin', role=None)
+        admin.role = None
+        session.add(admin)
+        session.add(User(id=100, username='u1'))
+
+        stats_message = FakeMessage(chat_id=999)
+        stats_callback = FakeCallback(data='admin_stats', bot=FakeBot(), message=stats_message)
+        await admin_callback(stats_callback, FakeState(), session, admin, True, False)
+        assert stats_callback.answered is True
+
+        export_message = FakeMessage(chat_id=999)
+        export_callback = FakeCallback(data='admin_export_db', bot=FakeBot(), message=export_message)
+        await admin_callback(export_callback, FakeState(), session, admin, False, True)
+        assert export_callback.answered is True
+
+    asyncio.run(scenario())
+
+
+def test_admin_can_add_balance_to_self():
+    async def scenario():
+        session = InMemorySession()
+        admin = User(id=777, username='admin')
+        admin.role = User.role if hasattr(User, 'role') else None
+        session.add(admin)
+
+        message = FakeMessage(chat_id=777, text='/selfbalance RUB 250')
+        await add_balance_to_user(message, True, False, session, admin)
+
+        balance = await BalanceRepository(session).get_balance(admin.id, Currency.RUB)
+        assert balance is not None
+        assert balance.amount == 250.0
+        assert message._answers
+
+    asyncio.run(scenario())
 
 
 async def run_scenario():

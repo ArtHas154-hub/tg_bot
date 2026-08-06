@@ -1,13 +1,35 @@
+import asyncio
+from datetime import datetime
+from types import SimpleNamespace
+
 from aiogram import BaseMiddleware
 from aiogram.types import Message, CallbackQuery
 from sqlalchemy.ext.asyncio import AsyncSession
-from types import SimpleNamespace
 
 from app.bot.utils import parse_start_payload
 from app.core.config import ADMIN_IDS, SUPER_ADMIN_IDS
-from app.db.repository import UserRepository
+from app.db.repository import UserRepository, SettingsRepository
 from app.db.session import get_session, InMemorySession
 from app.db.models import UserRole
+
+PROFILE_CACHE: dict[int, SimpleNamespace] = {}
+PROFILE_SYNC_TASKS: dict[int, asyncio.Task] = {}
+
+
+async def _sync_user_profile(session: AsyncSession | InMemorySession, user_id: int, username: str | None, full_name: str | None) -> SimpleNamespace:
+    repo = UserRepository(session)
+    db_user = await repo.create_or_update(user_id, username, full_name)
+    if user_id in SUPER_ADMIN_IDS:
+        db_user.role = UserRole.SUPER_ADMIN
+    elif user_id in ADMIN_IDS:
+        db_user.role = UserRole.ADMIN
+    await SettingsRepository(session).set(f'user_seen:{user_id}', datetime.utcnow().isoformat())
+    if not isinstance(session, InMemorySession):
+        await session.commit()
+    else:
+        session.add(db_user)
+    PROFILE_CACHE[user_id] = db_user
+    return db_user
 
 
 class DatabaseMiddleware(BaseMiddleware):
@@ -65,28 +87,11 @@ class UserProfileMiddleware(BaseMiddleware):
         if user is None:
             return await handler(event, data)
 
-        repo = UserRepository(session)
-        try:
-            db_user = await repo.create_or_update(user.id, user.username, user.full_name)
-        except Exception:
-            # If DB operation fails after session creation, fall back to minimal user
-            db_user = SimpleNamespace(
-                id=user.id,
-                username=getattr(user, 'username', None),
-                full_name=getattr(user, 'full_name', None),
-                registered_at=None,
-                card_data=None,
-                ton_wallet=None,
-                stars_recipient=None,
-                completed_deals=0,
-                total_volume=0.0,
-                blocked=False,
-                role=UserRole.USER,
-            )
-        if user.id in SUPER_ADMIN_IDS:
-            db_user.role = UserRole.SUPER_ADMIN
-        elif user.id in ADMIN_IDS:
-            db_user.role = UserRole.ADMIN
+        cached_user = PROFILE_CACHE.get(user.id)
+        if cached_user is None:
+            db_user = await _sync_user_profile(session, user.id, user.username, user.full_name)
+        else:
+            db_user = cached_user
 
         if getattr(db_user, 'blocked', False):
             if isinstance(event, Message):

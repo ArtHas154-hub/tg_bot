@@ -1,4 +1,5 @@
 from __future__ import annotations
+import random
 from datetime import datetime
 from typing import Any
 from sqlalchemy import select, update, func, String
@@ -33,7 +34,13 @@ class UserRepository:
         if self._use_memory():
             return IN_MEMORY_STORE.users.get(user_id)
         result = await self.session.execute(select(User).where(User.id == user_id))
-        return result.scalar_one_or_none()
+        if result is None:
+            return None
+        if hasattr(result, 'scalar_one_or_none'):
+            return result.scalar_one_or_none()
+        if hasattr(result, 'scalars'):
+            return result.scalars().first()
+        return None
 
     async def create_or_update(self, user_id: int, username: str | None, full_name: str | None) -> User:
         user = await self.get(user_id)
@@ -44,10 +51,10 @@ class UserRepository:
             return user
 
         changed = False
-        if username and user.username != username:
+        if username is not None and user.username != username:
             user.username = username
             changed = True
-        if full_name and user.full_name != full_name:
+        if full_name is not None and user.full_name != full_name:
             user.full_name = full_name
             changed = True
         if changed:
@@ -87,7 +94,11 @@ class UserRepository:
             | (func.cast(User.id, String).ilike(f'%{query}%'))
         ).limit(limit)
         result = await self.session.execute(stmt)
-        return result.scalars().all()
+        if result is None:
+            return []
+        if hasattr(result, 'scalars'):
+            return result.scalars().all()
+        return []
 
 
     async def update_requisites(
@@ -130,7 +141,13 @@ class BalanceRepository:
         result = await self.session.execute(
             select(Balance).where(Balance.user_id == user_id, Balance.currency == currency)
         )
-        return result.scalar_one_or_none()
+        if result is None:
+            return None
+        if hasattr(result, 'scalar_one_or_none'):
+            return result.scalar_one_or_none()
+        if hasattr(result, 'scalars'):
+            return result.scalars().first()
+        return None
 
     async def ensure_balance(self, user_id: int, currency: Currency) -> Balance:
         balance = await self.get_balance(user_id, currency)
@@ -138,11 +155,13 @@ class BalanceRepository:
             balance = Balance(user_id=user_id, currency=currency, amount=0.0)
             self.session.add(balance)
             await self.session.flush()
+            if self._use_memory():
+                IN_MEMORY_STORE.balances[(user_id, currency)] = balance
         return balance
 
     async def change(self, user_id: int, currency: Currency, delta: float) -> Balance:
         balance = await self.ensure_balance(user_id, currency)
-        balance.amount = max(balance.amount + delta, 0.0)
+        balance.amount = max(float(balance.amount) + float(delta), 0.0)
         await self.session.flush()
         return balance
 
@@ -150,7 +169,11 @@ class BalanceRepository:
         if self._use_memory():
             return [balance for key, balance in IN_MEMORY_STORE.balances.items() if key[0] == user_id]
         result = await self.session.execute(select(Balance).where(Balance.user_id == user_id))
-        return result.scalars().all()
+        if result is None:
+            return []
+        if hasattr(result, 'scalars'):
+            return result.scalars().all()
+        return []
 
 
 class DealRepository:
@@ -162,27 +185,28 @@ class DealRepository:
 
     async def next_deal_number(self) -> int:
         if self._use_memory():
-            existing_numbers = [num for num in IN_MEMORY_STORE.deals.keys() if isinstance(num, int)]
-            if existing_numbers:
-                base = max(existing_numbers, default=0)
-                current = max(IN_MEMORY_STORE.next_deal_number, base + 1)
-            else:
-                current = 1
-            while current in IN_MEMORY_STORE.deals:
-                current += 1
-            IN_MEMORY_STORE.next_deal_number = current + 1
-            return current
+            while True:
+                number = random.randint(1000, 99999)
+                if number not in IN_MEMORY_STORE.deals:
+                    return number
 
         result = await self.session.execute(select(func.max(Deal.deal_number)))
-        last = result.scalar_one_or_none()
+        last = None
+        if result is not None and hasattr(result, 'scalar_one_or_none'):
+            last = result.scalar_one_or_none()
         if last is None:
-            return 1
-        candidate = last + 1
+            candidate = random.randint(1000, 99999)
+            while True:
+                existing = await self.get_by_number(candidate)
+                if existing is None:
+                    return candidate
+                candidate = random.randint(1000, 99999)
+        candidate = random.randint(1000, 99999)
         while True:
             existing = await self.get_by_number(candidate)
             if existing is None:
                 return candidate
-            candidate += 1
+            candidate = random.randint(1000, 99999)
 
     async def create(self, seller_id: int, currency: Currency, amount: float, item_description: str, payment_comment: str) -> Deal:
         deal_number = await self.next_deal_number()
@@ -208,7 +232,13 @@ class DealRepository:
         if self._use_memory():
             return IN_MEMORY_STORE.deals.get(deal_number)
         result = await self.session.execute(select(Deal).where(Deal.deal_number == deal_number))
-        return result.scalar_one_or_none()
+        if result is None:
+            return None
+        if hasattr(result, 'scalar_one_or_none'):
+            return result.scalar_one_or_none()
+        if hasattr(result, 'scalars'):
+            return result.scalars().first()
+        return None
 
     async def get_by_code(self, deal_code: str) -> Deal | None:
         if self._use_memory():
@@ -217,13 +247,23 @@ class DealRepository:
                     return deal
             return None
         result = await self.session.execute(select(Deal).where(Deal.deal_code == deal_code))
-        return result.scalar_one_or_none()
+        if result is None:
+            return None
+        if hasattr(result, 'scalar_one_or_none'):
+            return result.scalar_one_or_none()
+        if hasattr(result, 'scalars'):
+            return result.scalars().first()
+        return None
 
     async def list_recent(self, limit: int = 20) -> list[Deal]:
         if self._use_memory():
             return sorted(IN_MEMORY_STORE.deals.values(), key=lambda deal: deal.created_at, reverse=True)[:limit]
         result = await self.session.execute(select(Deal).order_by(Deal.created_at.desc()).limit(limit))
-        return result.scalars().all()
+        if result is None:
+            return []
+        if hasattr(result, 'scalars'):
+            return result.scalars().all()
+        return []
 
     async def list_active(self) -> list[Deal]:
         if self._use_memory():
@@ -248,7 +288,11 @@ class DealRepository:
                 DealStatus.AWAITING_CONFIRM,
             ])).order_by(Deal.created_at.desc())
         )
-        return result.scalars().all()
+        if result is None:
+            return []
+        if hasattr(result, 'scalars'):
+            return result.scalars().all()
+        return []
 
     async def update_status(self, deal: Deal, status: DealStatus) -> None:
         deal.status = status
@@ -281,7 +325,11 @@ class PaymentRepository:
         if isinstance(self.session, InMemorySession):
             return [payment for payment in IN_MEMORY_STORE.payments.values() if payment.status == PaymentStatus.WAITING]
         result = await self.session.execute(select(Payment).where(Payment.status == PaymentStatus.WAITING))
-        return result.scalars().all()
+        if result is None:
+            return []
+        if hasattr(result, 'scalars'):
+            return result.scalars().all()
+        return []
 
     async def update_status(self, payment: Payment, status: PaymentStatus, admin_id: int | None = None) -> None:
         payment.status = status
@@ -294,16 +342,22 @@ class WithdrawRepository:
         self.session = session
 
     async def create(self, user_id: int, currency: Currency, amount: float) -> WithdrawRequest:
-        request = WithdrawRequest(user_id=user_id, currency=currency, amount=amount)
+        request = WithdrawRequest(user_id=user_id, currency=currency, amount=amount, status=WithdrawStatus.PENDING)
         self.session.add(request)
         await self.session.flush()
+        if isinstance(self.session, InMemorySession):
+            IN_MEMORY_STORE.withdraws[len(IN_MEMORY_STORE.withdraws) + 1] = request
         return request
 
     async def list_pending(self) -> list[WithdrawRequest]:
         if isinstance(self.session, InMemorySession):
             return [request for request in IN_MEMORY_STORE.withdraws.values() if request.status == WithdrawStatus.PENDING]
         result = await self.session.execute(select(WithdrawRequest).where(WithdrawRequest.status == WithdrawStatus.PENDING))
-        return result.scalars().all()
+        if result is None:
+            return []
+        if hasattr(result, 'scalars'):
+            return result.scalars().all()
+        return []
 
     async def update_status(self, request: WithdrawRequest, status: WithdrawStatus, admin_id: int, note: str | None = None) -> None:
         request.status = status
@@ -322,7 +376,14 @@ class SettingsRepository:
             setting = IN_MEMORY_STORE.settings.get(key)
             return setting.value if setting else None
         result = await self.session.execute(select(Setting).where(Setting.key == key))
-        setting = result.scalar_one_or_none()
+        if result is None:
+            return None
+        if hasattr(result, 'scalar_one_or_none'):
+            setting = result.scalar_one_or_none()
+        elif hasattr(result, 'scalars'):
+            setting = result.scalars().first()
+        else:
+            setting = None
         return setting.value if setting else None
 
     async def set(self, key: str, value: str) -> Setting:
@@ -345,7 +406,13 @@ class SettingsRepository:
 
     async def _get_model(self, key: str) -> Setting | None:
         result = await self.session.execute(select(Setting).where(Setting.key == key))
-        return result.scalar_one_or_none()
+        if result is None:
+            return None
+        if hasattr(result, 'scalar_one_or_none'):
+            return result.scalar_one_or_none()
+        if hasattr(result, 'scalars'):
+            return result.scalars().first()
+        return None
 
 
 class AdminLogRepository:
@@ -362,4 +429,8 @@ class AdminLogRepository:
         if isinstance(self.session, InMemorySession):
             return sorted(IN_MEMORY_STORE.admin_logs, key=lambda item: item.created_at, reverse=True)[:limit]
         result = await self.session.execute(select(AdminLog).order_by(AdminLog.created_at.desc()).limit(limit))
-        return result.scalars().all()
+        if result is None:
+            return []
+        if hasattr(result, 'scalars'):
+            return result.scalars().all()
+        return []

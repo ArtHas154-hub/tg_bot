@@ -1,8 +1,9 @@
 import pytest
 
-from app.bot.handlers import menu_callback, confirm_payment, withdraw_ok
+from app.bot import middlewares
+from app.bot.handlers import menu_callback, confirm_payment, send_messages_concurrently, withdraw_ok
 from app.db.models import Balance, Currency, Deal, DealStatus, Payment, PaymentStatus, User, WithdrawStatus
-from app.db.repository import BalanceRepository, DealRepository, WithdrawRepository
+from app.db.repository import BalanceRepository, DealRepository, UserRepository, WithdrawRepository
 from app.db.session import InMemorySession
 
 
@@ -42,6 +43,45 @@ class FakeCallback:
 
 
 @pytest.mark.asyncio
+async def test_sync_user_profile_commits_after_persisting_user(monkeypatch):
+    class FakeSession:
+        def __init__(self):
+            self.commit_calls = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def add(self, obj):
+            return None
+
+        async def flush(self):
+            return None
+
+        async def commit(self):
+            self.commit_calls += 1
+
+        async def execute(self, *args, **kwargs):
+            return None
+
+    session = FakeSession()
+    monkeypatch.setattr(middlewares, 'get_session', lambda: session)
+    monkeypatch.setattr(middlewares, 'PROFILE_CACHE', {})
+    monkeypatch.setattr(middlewares, 'PROFILE_SYNC_TASKS', {})
+
+    async def fake_set(self, key, value):
+        return None
+
+    monkeypatch.setattr(middlewares.SettingsRepository, 'set', fake_set)
+
+    await middlewares._sync_user_profile(session, 123456, 'tester', 'Tester')
+
+    assert session.commit_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_menu_callback_switches_language():
     bot = FakeBot()
     session = InMemorySession()
@@ -56,25 +96,55 @@ async def test_menu_callback_switches_language():
 
 
 @pytest.mark.asyncio
-async def test_next_deal_number_starts_at_1():
+async def test_next_deal_number_is_randomized_and_unique():
     session = InMemorySession()
     repo = DealRepository(session)
 
     number = await repo.next_deal_number()
 
-    assert number == 1
+    assert 1000 <= number <= 99999
 
 
 @pytest.mark.asyncio
-async def test_consecutive_deals_increment_from_1():
+async def test_consecutive_deals_are_randomized_and_unique():
     session = InMemorySession()
     repo = DealRepository(session)
 
-    first = await repo.create(1, Currency.RUB, 10.0, 'First', 'COMMENT')
-    second = await repo.create(2, Currency.RUB, 20.0, 'Second', 'COMMENT2')
+    first = await repo.create(1, Currency.RUB, 500.0, 'First', 'COMMENT')
+    second = await repo.create(2, Currency.RUB, 600.0, 'Second', 'COMMENT2')
 
-    assert first.deal_number == 1
-    assert second.deal_number == 2
+    assert first.deal_number != second.deal_number
+    assert 1000 <= first.deal_number <= 99999
+    assert 1000 <= second.deal_number <= 99999
+
+
+@pytest.mark.asyncio
+async def test_send_messages_concurrently_delivers_to_all_targets():
+    class SpyBot:
+        def __init__(self):
+            self.sent = []
+
+        async def send_message(self, chat_id, text, **kwargs):
+            self.sent.append((chat_id, text, kwargs))
+
+    bot = SpyBot()
+    await send_messages_concurrently(bot, [1, 2, 3], 'hello')
+
+    assert [chat_id for chat_id, _, _ in bot.sent] == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_user_repository_get_returns_target_user_for_in_memory_sessions():
+    session = InMemorySession()
+    first = User(id=1, username='first')
+    second = User(id=2, username='second')
+    session.add(first)
+    session.add(second)
+
+    found = await UserRepository(session).get(2)
+
+    assert found is second
+    assert found.id == 2
 
 
 @pytest.mark.asyncio
