@@ -15,11 +15,14 @@ from app.core.logger import logger
 
 POLLING_TIMEOUT_SECONDS = 1
 TELEGRAM_API_TIMEOUT_SECONDS = 10.0
+MAX_BOT_LATENCY_SECONDS = 1.0
+POLLING_TIMEOUT_SECONDS = 1
 
 
 async def main() -> None:
     storage = MemoryStorage()
     session = AiohttpSession(timeout=TELEGRAM_API_TIMEOUT_SECONDS)
+    session = AiohttpSession(timeout=MAX_BOT_LATENCY_SECONDS)
     bot = Bot(
         token=BOT_TOKEN,
         session=session,
@@ -39,6 +42,8 @@ async def main() -> None:
         logger.info(
             'Запуск бота с polling timeout %.0f мс...',
             POLLING_TIMEOUT_SECONDS * 1000,
+            'Запуск бота с максимальной задержкой %.0f мс...',
+            MAX_BOT_LATENCY_SECONDS * 1000,
         )
         await dp.start_polling(bot, polling_timeout=POLLING_TIMEOUT_SECONDS)
     except TelegramNetworkError as exc:
