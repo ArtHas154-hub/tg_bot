@@ -1,8 +1,8 @@
 import pytest
 
 from app.bot import middlewares
-from app.bot.handlers import menu_callback, confirm_payment, send_messages_concurrently, withdraw_ok
-from app.db.models import Balance, Currency, Deal, DealStatus, Payment, PaymentStatus, User, WithdrawStatus
+from app.bot.handlers import admin_callback, broadcast_confirm, menu_callback, confirm_payment, send_messages_concurrently, withdraw_ok
+from app.db.models import Balance, Currency, Deal, DealStatus, Payment, PaymentStatus, User, UserRole, WithdrawStatus
 from app.db.repository import BalanceRepository, DealRepository, UserRepository, WithdrawRepository
 from app.db.session import InMemorySession
 
@@ -24,11 +24,33 @@ class FakeChat:
 
 
 class FakeMessage:
-    def __init__(self, chat_id):
+    def __init__(self, chat_id, bot=None, text=''):
         self.chat = FakeChat(chat_id)
+        self.bot = bot
+        self.text = text
+        self.answers = []
 
     async def answer(self, text, **kwargs):
+        self.answers.append((text, kwargs))
         return None
+
+
+class FakeState:
+    def __init__(self, data=None):
+        self.data = data or {}
+        self.cleared = False
+
+    async def get_data(self):
+        return self.data
+
+    async def update_data(self, **kwargs):
+        self.data.update(kwargs)
+
+    async def set_state(self, *args, **kwargs):
+        return None
+
+    async def clear(self):
+        self.cleared = True
 
 
 class FakeCallback:
@@ -201,6 +223,46 @@ async def test_confirm_payment_sends_seller_transfer_button():
 
     assert any('Передайте подарок покупателю' in (text or '') for _, text, _ in bot.sent)
     assert any('seller_transferred' in str(kwargs.get('reply_markup')) for _, _, kwargs in bot.sent)
+
+
+@pytest.mark.asyncio
+async def test_admin_balances_shows_in_memory_balances():
+    session = InMemorySession()
+    admin = User(id=1001, username='admin')
+    target = User(id=1002, username='seller')
+    session.add(admin)
+    session.add(target)
+    await BalanceRepository(session).change(target.id, Currency.RUB, 125.0)
+
+    message = FakeMessage(chat_id=admin.id)
+    callback = FakeCallback(data='admin_balances', bot=FakeBot(), message=message)
+    await admin_callback(callback, FakeState(), session, admin, True, False)
+
+    assert callback.answered is True
+    assert message.answers
+    assert 'Балансы отсутствуют' not in message.answers[-1][0]
+    assert '@seller | 125.00 RUB' in message.answers[-1][0]
+
+
+@pytest.mark.asyncio
+async def test_broadcast_reports_total_recipients_when_delivery_fails():
+    class FailingBot:
+        async def send_message(self, chat_id, text, **kwargs):
+            raise RuntimeError('network unavailable')
+
+    session = InMemorySession()
+    admin = User(id=2001, username='admin', role=UserRole.ADMIN)
+    user = User(id=2002, username='user')
+    session.add(admin)
+    session.add(user)
+
+    state = FakeState({'broadcast_text': 'hello'})
+    message = FakeMessage(chat_id=admin.id, bot=FailingBot(), text='Да')
+    await broadcast_confirm(message, state, session, admin)
+
+    assert state.cleared is True
+    assert message.answers[-1][0].startswith('✅ Рассылка отправлена 0 из ')
+    assert message.answers[-1][0] != '✅ Рассылка отправлена 0 пользователям.'
 
 @pytest.mark.asyncio
 async def test_db_export_import_round_trips_core_tables():

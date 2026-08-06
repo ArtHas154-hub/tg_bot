@@ -77,6 +77,7 @@ from app.db.repository import (
     UserRepository,
     WithdrawRepository,
 )
+from app.db.session import IN_MEMORY_STORE, InMemorySession
 
 
 def get_currency_by_label(label: str) -> Optional[Currency]:
@@ -297,6 +298,32 @@ async def send_messages_concurrently(bot, chat_ids: list[int], text: str, **kwar
 
     results = await asyncio.gather(*(_send(chat_id) for chat_id in chat_ids), return_exceptions=True)
     return sum(1 for result in results if result is True)
+
+
+async def get_broadcast_recipients(session: AsyncSession) -> list[int]:
+    if isinstance(session, InMemorySession):
+        users = list(IN_MEMORY_STORE.users.values())
+    else:
+        rows = await session.execute(select(User).where(User.blocked.is_(False)))
+        users = rows.scalars().all()
+
+    recipients: list[int] = []
+    for user in users:
+        blocked_value = getattr(user, 'blocked', False)
+        if isinstance(blocked_value, str):
+            blocked_value = blocked_value.strip().lower() in {'1', 'true', 'yes', 'y'}
+        if blocked_value:
+            continue
+        recipients.append(int(user.id))
+    return sorted(set(recipients))
+
+
+async def get_admin_balances(session: AsyncSession, limit: int = 50) -> list[Balance]:
+    if isinstance(session, InMemorySession):
+        return list(IN_MEMORY_STORE.balances.values())[:limit]
+
+    result = await session.execute(select(Balance).limit(limit))
+    return result.scalars().all()
 
 
 async def notify_admins(bot, text: str) -> None:
@@ -1735,19 +1762,9 @@ async def broadcast_confirm(message: Message, state: FSMContext, session: AsyncS
         await state.clear()
         return
 
-    rows = await session.execute(select(User))
-    users = rows.scalars().all()
-    recipients = []
-    for user in users:
-        blocked_value = getattr(user, 'blocked', False)
-        if isinstance(blocked_value, str):
-            blocked_value = blocked_value.strip().lower() in {'1', 'true', 'yes', 'y'}
-        if blocked_value:
-            continue
-        recipients.append(int(user.id))
-    recipients = sorted(set(recipients))
+    recipients = await get_broadcast_recipients(session)
     sent = await send_messages_concurrently(message.bot, recipients, text)
-    await message.answer(f'✅ Рассылка отправлена {sent} пользователям.')
+    await message.answer(f'✅ Рассылка отправлена {sent} из {len(recipients)} пользователям.')
     await state.clear()
 
 
@@ -1915,15 +1932,15 @@ async def import_db_from_message(message: Message, state: FSMContext, session: A
         return
 
     try:
-      file = await message.bot.get_file(message.document.file_id)
-raw = await message.bot.download_file(file.file_path)
-if hasattr(raw, 'read'):
-    raw = await asyncio.to_thread(raw.read)
-if isinstance(raw, str):
-    decoded = raw
-else:
-    decoded = await asyncio.to_thread(bytes(raw).decode, 'utf-8-sig')
-payload = await asyncio.to_thread(__import__('json').loads, decoded)
+        file = await message.bot.get_file(message.document.file_id)
+        raw = await message.bot.download_file(file.file_path)
+        if hasattr(raw, 'read'):
+            raw = await asyncio.to_thread(raw.read)
+        if isinstance(raw, str):
+            decoded = raw
+        else:
+            decoded = await asyncio.to_thread(bytes(raw).decode, 'utf-8-sig')
+        payload = await asyncio.to_thread(__import__('json').loads, decoded)
     except Exception:
         await message.answer('❌ Файл должен быть корректным JSON-экспортом базы данных.')
         await state.clear()
@@ -2118,8 +2135,7 @@ async def admin_callback(callback: CallbackQuery, state: FSMContext, session: As
             await callback.answer('Средства начислены.')
             return
     if data == 'admin_balances':
-        result = await session.execute(select(Balance).limit(50))
-        balances = result.scalars().all()
+        balances = await get_admin_balances(session)
         if not balances:
             await callback.message.answer('Балансы отсутствуют.')
         else:
