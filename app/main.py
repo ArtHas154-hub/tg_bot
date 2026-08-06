@@ -12,6 +12,8 @@ from app.bot.middlewares import DatabaseMiddleware, UserProfileMiddleware
 from app.core.config import BOT_TOKEN
 from app.core.logger import logger
 
+POLLING_TIMEOUT_SECONDS = 1
+
 
 async def main() -> None:
     storage = MemoryStorage()
@@ -27,8 +29,9 @@ async def main() -> None:
         await setup_bot_menu(bot)
         await register_handlers(dp)
 
-        logger.info('Запуск бота...')
-        await dp.start_polling(bot, polling_timeout=1)
+        polling_timeout_ms = POLLING_TIMEOUT_SECONDS * 1000
+        logger.info(f'Запуск бота с polling timeout {polling_timeout_ms} мс...')
+        await dp.start_polling(bot, polling_timeout=POLLING_TIMEOUT_SECONDS)
     except TelegramNetworkError as exc:
         logger.error('Не удалось подключиться к Telegram API: %s', exc)
         raise
