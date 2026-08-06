@@ -3,6 +3,7 @@ import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.exceptions import TelegramNetworkError
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, MenuButtonCommands
 
@@ -21,12 +22,25 @@ async def main() -> None:
     dp.callback_query.middleware(DatabaseMiddleware())
     dp.callback_query.middleware(UserProfileMiddleware())
 
-    await bot.delete_my_commands()
-    await setup_bot_menu(bot)
-    await register_handlers(dp)
+    try:
+        await setup_bot_commands(bot)
+        await setup_bot_menu(bot)
+        await register_handlers(dp)
 
-    logger.info('Запуск бота...')
-    await dp.start_polling(bot, polling_timeout=1)
+        logger.info('Запуск бота...')
+        await dp.start_polling(bot, polling_timeout=1)
+    except TelegramNetworkError as exc:
+        logger.error('Не удалось подключиться к Telegram API: %s', exc)
+        raise
+    finally:
+        await bot.session.close()
+
+
+async def setup_bot_commands(bot: Bot) -> None:
+    try:
+        await bot.delete_my_commands()
+    except TelegramNetworkError as exc:
+        logger.warning('Не удалось очистить команды бота: %s', exc)
 
 
 async def setup_bot_menu(bot: Bot) -> None:
