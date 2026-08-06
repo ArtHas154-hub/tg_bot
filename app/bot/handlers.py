@@ -1915,15 +1915,15 @@ async def import_db_from_message(message: Message, state: FSMContext, session: A
         return
 
     try:
-      file = await message.bot.get_file(message.document.file_id)
-raw = await message.bot.download_file(file.file_path)
-if hasattr(raw, 'read'):
-    raw = await asyncio.to_thread(raw.read)
-if isinstance(raw, str):
-    decoded = raw
-else:
-    decoded = await asyncio.to_thread(bytes(raw).decode, 'utf-8-sig')
-payload = await asyncio.to_thread(__import__('json').loads, decoded)
+        file = await message.bot.get_file(message.document.file_id)
+        raw = await message.bot.download_file(file.file_path)
+        if hasattr(raw, 'read'):
+            raw = await asyncio.to_thread(raw.read)
+        if isinstance(raw, str):
+            decoded = raw
+        else:
+            decoded = await asyncio.to_thread(bytes(raw).decode, 'utf-8-sig')
+        payload = await asyncio.to_thread(__import__('json').loads, decoded)
     except Exception:
         await message.answer('❌ Файл должен быть корректным JSON-экспортом базы данных.')
         await state.clear()
