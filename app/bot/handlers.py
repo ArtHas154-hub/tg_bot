@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import enum
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -172,6 +173,7 @@ async def get_user_language(session: AsyncSession, user_id: int) -> str:
 
 
 async def set_user_language(session: AsyncSession, user_id: int, lang: str) -> None:
+    LANGUAGE_CACHE[user_id] = lang
     await SettingsRepository(session).set(f'user_lang:{user_id}', lang)
 
 
@@ -438,10 +440,9 @@ async def language_callback(callback: CallbackQuery, session: AsyncSession, db_u
     language = 'ru' if action == 'set_lang_ru' else 'en'
     await set_user_language(session, db_user.id, language)
     await session.commit()
-    await callback.bot.send_photo(
+    await callback.bot.send_message(
         callback.message.chat.id,
-        photo=logo_file(),
-        caption=get_localized_text('settings_saved', language),
+        get_localized_text('settings_saved', language),
         reply_markup=settings_menu(language),
         parse_mode='HTML',
     )
@@ -483,10 +484,9 @@ async def menu_callback(callback: CallbackQuery, state: FSMContext, session: Asy
         language = 'ru' if action == 'set_lang_ru' else 'en'
         await set_user_language(session, db_user.id, language)
         await session.commit()
-        await callback.bot.send_photo(
+        await callback.bot.send_message(
             callback.message.chat.id,
-            photo=logo_file(),
-            caption=get_localized_text('settings_saved', language),
+            get_localized_text('settings_saved', language),
             reply_markup=settings_menu(language),
             parse_mode='HTML',
         )
@@ -494,13 +494,13 @@ async def menu_callback(callback: CallbackQuery, state: FSMContext, session: Asy
         return
     if action == 'menu_create_deal':
         language = await get_user_language(session, db_user.id)
-        await replace_message_with_text(get_localized_text('create_step1', language), deal_type_menu())
+        await replace_message_with_text(get_localized_text('create_step1', language), deal_type_menu(language))
         await state.set_state(DealCreation.choose_type)
         await callback.answer()
         return
     if action == 'menu_deal_type_gift':
         language = await get_user_language(session, db_user.id)
-        await replace_message_with_text(get_localized_text('create_step2', language), deal_currency_menu())
+        await replace_message_with_text(get_localized_text('create_step2', language), deal_currency_menu(language))
         await state.set_state(DealCreation.choose_currency)
         await callback.answer()
         return
@@ -1655,13 +1655,27 @@ async def export_db_file(session: AsyncSession) -> Path:
     import json
     from tempfile import gettempdir
 
+    def _clean_value(value):
+        if isinstance(value, enum.Enum):
+            return value.value
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return value
+
+    def _row_to_dict(row) -> dict:
+        return {
+            column.name: _clean_value(getattr(row, column.name))
+            for column in row.__table__.columns
+        }
+
     data = {}
     for model in [User, Deal, Payment, WithdrawRequest, Balance]:
-        rows = await session.execute(select(model))
-        cleaned_rows = []
-        for row in rows.scalars().all():
-            cleaned_rows.append({key: value for key, value in row.__dict__.items() if not key.startswith('_')})
-        data[model.__tablename__] = cleaned_rows
+        if hasattr(session, 'store'):
+            rows = list(session._iter_model_rows(model))
+        else:
+            result = await session.execute(select(model))
+            rows = result.scalars().all()
+        data[model.__tablename__] = [_row_to_dict(row) for row in rows]
     filename = Path(gettempdir()) / f'db_export_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}.json'
 
     def _write_json(path: Path, payload: dict) -> None:
@@ -1770,9 +1784,23 @@ async def is_user_online(session: AsyncSession, user_id: int, window_seconds: in
     return (datetime.utcnow() - seen_at).total_seconds() <= window_seconds
 
 
-async def import_db_payload(session: AsyncSession, payload: dict) -> tuple[int, int]:
-    imported_users = 0
-    imported_balances = 0
+async def import_db_payload(session: AsyncSession, payload: dict) -> dict[str, int]:
+    def _enum(enum_cls, value):
+        if isinstance(value, enum_cls):
+            return value
+        if value in enum_cls.__members__:
+            return enum_cls[value]
+        return enum_cls(value)
+
+    def _dt(value):
+        if not value or isinstance(value, datetime):
+            return value
+        try:
+            return datetime.fromisoformat(str(value))
+        except ValueError:
+            return None
+
+    counts = {'users': 0, 'deals': 0, 'payments': 0, 'withdraw_requests': 0, 'balances': 0}
     for key, rows in (payload or {}).items():
         if key == 'users':
             for row in rows:
@@ -1796,19 +1824,85 @@ async def import_db_payload(session: AsyncSession, payload: dict) -> tuple[int, 
                     existing.role = UserRole.ADMIN
                 else:
                     existing.role = UserRole.USER
-                imported_users += 1
+                registered_at = _dt(row.get('registered_at'))
+                if registered_at:
+                    existing.registered_at = registered_at
+                counts['users'] += 1
+        elif key == 'deals':
+            for row in rows:
+                deal_id = row.get('id')
+                deal = await session.get(Deal, int(deal_id)) if deal_id is not None else None
+                if deal is None and row.get('deal_number') is not None:
+                    existing = await DealRepository(session).get_by_number(int(row.get('deal_number')))
+                    deal = existing
+                if deal is None:
+                    deal = Deal()
+                    if deal_id is not None:
+                        deal.id = int(deal_id)
+                    session.add(deal)
+                deal.deal_number = int(row.get('deal_number') or deal.id or 0)
+                deal.deal_code = row.get('deal_code') or ''
+                deal.seller_id = int(row.get('seller_id'))
+                deal.buyer_id = int(row.get('buyer_id')) if row.get('buyer_id') is not None else None
+                deal.deal_type = row.get('deal_type') or 'gift'
+                deal.currency = _enum(Currency, row.get('currency'))
+                deal.amount = float(row.get('amount') or 0.0)
+                deal.item_description = row.get('item_description') or ''
+                deal.status = _enum(DealStatus, row.get('status') or DealStatus.CREATED.value)
+                deal.payment_comment = row.get('payment_comment')
+                deal.created_at = _dt(row.get('created_at')) or datetime.utcnow()
+                deal.updated_at = _dt(row.get('updated_at')) or datetime.utcnow()
+                counts['deals'] += 1
+        elif key == 'payments':
+            for row in rows:
+                payment_id = row.get('id')
+                payment = await session.get(Payment, int(payment_id)) if payment_id is not None else None
+                if payment is None:
+                    payment = Payment()
+                    if payment_id is not None:
+                        payment.id = int(payment_id)
+                    session.add(payment)
+                payment.deal_id = int(row.get('deal_id'))
+                payment.buyer_id = int(row.get('buyer_id'))
+                payment.amount = float(row.get('amount') or 0.0)
+                payment.currency = _enum(Currency, row.get('currency'))
+                payment.comment = row.get('comment') or ''
+                payment.status = _enum(PaymentStatus, row.get('status') or PaymentStatus.WAITING.value)
+                payment.admin_id = int(row.get('admin_id')) if row.get('admin_id') is not None else None
+                payment.created_at = _dt(row.get('created_at')) or datetime.utcnow()
+                counts['payments'] += 1
+        elif key == 'withdraw_requests':
+            for row in rows:
+                request_id = row.get('id')
+                request = await session.get(WithdrawRequest, int(request_id)) if request_id is not None else None
+                if request is None:
+                    request = WithdrawRequest()
+                    if request_id is not None:
+                        request.id = int(request_id)
+                    session.add(request)
+                request.user_id = int(row.get('user_id'))
+                request.currency = _enum(Currency, row.get('currency'))
+                request.amount = float(row.get('amount') or 0.0)
+                request.status = _enum(WithdrawStatus, row.get('status') or WithdrawStatus.PENDING.value)
+                request.admin_id = int(row.get('admin_id')) if row.get('admin_id') is not None else None
+                request.created_at = _dt(row.get('created_at')) or datetime.utcnow()
+                request.processed_at = _dt(row.get('processed_at'))
+                request.note = row.get('note')
+                counts['withdraw_requests'] += 1
         elif key == 'balances':
             for row in rows:
                 user_id = int(row.get('user_id'))
-                currency = Currency(row.get('currency'))
+                currency = _enum(Currency, row.get('currency'))
                 balance = await BalanceRepository(session).get_balance(user_id, currency)
                 if balance is None:
                     balance = Balance(user_id=user_id, currency=currency, amount=0.0)
+                    if row.get('id') is not None:
+                        balance.id = int(row.get('id'))
                     session.add(balance)
                 balance.amount = float(row.get('amount') or 0.0)
-                imported_balances += 1
+                counts['balances'] += 1
     await session.commit()
-    return imported_users, imported_balances
+    return counts
 
 
 async def import_db_from_message(message: Message, state: FSMContext, session: AsyncSession, db_user: User) -> None:
@@ -1857,8 +1951,15 @@ async def import_db_from_message(message: Message, state: FSMContext, session: A
         await state.clear()
         return
 
-    imported_users, imported_balances = await import_db_payload(session, normalized)
-    await message.answer(f'✅ Импорт базы данных выполнен успешно: пользователей {imported_users}, балансов {imported_balances}.')
+    counts = await import_db_payload(session, normalized)
+    await message.answer(
+        '✅ Импорт базы данных выполнен успешно: '
+        f'пользователей {counts.get("users", 0)}, '
+        f'сделок {counts.get("deals", 0)}, '
+        f'оплат {counts.get("payments", 0)}, '
+        f'заявок на вывод {counts.get("withdraw_requests", 0)}, '
+        f'балансов {counts.get("balances", 0)}.'
+    )
     await state.clear()
 
 
